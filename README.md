@@ -1,140 +1,139 @@
 # 332 Distributed Sorting Project
 
 ## Team Information
-- Team Members: leejm21, tedoh7, sys030610
+
+- **Members**: Jimin, Sangwon, Youngseo
+- **Course**: CSE332 Software Design Methods (Fall 2025)
 
 ---
 
-## Week 1 Progress (Week of 1013)
+## Project Overview
 
-### What We Did This Week
-- Formed project team
-- Reviewed project requirements and specifications
-- Set up Git repository
-- Studied distributed sorting algorithms
-- Reviewed gensort tool documentation
-- Initial discussion on system architecture
+Fault-tolerant distributed sorting system for key/value records across multiple machines.
 
-### Challenges/Issues
-- Need to finalize technology stack decision (gRPC vs Netty vs java.net)
-- Need to set up development environment
+### Requirements
 
----
+- **Input**: 100-byte records (10-byte key + 90-byte value) distributed across workers
+- **Output**: Sorted records distributed across workers with defined ordering
+- **Architecture**: 1 Master + N Workers
+- **Key Feature**: Must handle worker crashes during execution
 
-## Week 2 Goals (Milestone #1 Target)
+### System Flow
 
-### Team Goals
-1. **Environment Setup**
-   - Install and test gensort tool
-   - Generate sample input data (small scale: ~100MB)
-   - Set up Scala development environment
-   - Decide on network library (gRPC recommended)
-
-2. **Basic Implementation**
-   - Implement basic Master class skeleton
-   - Implement basic Worker class skeleton
-   - Test Master-Worker connection
-   - Master can print IP:port
-   - Worker can connect to Master
-
-3. **Learning**
-   - Learn chosen network library (gRPC + Protobuf)
-   - Study key comparison logic for binary data
-   - Understand 100-byte record structure (10-byte key + 90-byte value)
-
-### Individual Responsibilities
-
-#### leejm21
-- Set up gensort and generate test data
-- Research gRPC/Protobuf basics
-- Implement Master skeleton code
-
-#### tedoh7
-- Set up development environment
-- Implement Worker skeleton code
-- Study file I/O for binary data
-
-#### sys030610
-- Design system architecture document
-- Research key comparison algorithm
-- Set up network communication protocol
-
----
-
-## Overall Project Plan
-
-### Phase 1: Basic Infrastructure (Week 1-2)
-- Environment setup
-- Master-Worker connection
-- Basic network communication
-
-### Phase 2: Core Sorting Logic (Week 3-4)
-- Sampling implementation
-- Local sort and partition
-- Key range distribution
-
-### Phase 3: Distributed Operations (Week 5)
-- Shuffle implementation
-- Data transfer between workers
-- Merge implementation
-- **Progress Report Due: Nov 16**
-
-### Phase 4: Fault Tolerance (Week 6-7)
-- Worker failure handling
-- State recovery mechanism
-- Testing with worker crashes
-
-### Phase 5: Testing & Optimization (Week 8)
-- Integration testing
-- Performance tuning
-- Bug fixes
-- **Final Submission: Dec 7**
-
----
-
-## Technical Decisions to Make
-
-### Priority Decisions (Week 2)
-- [ ] Network library choice: gRPC (recommended) vs Netty vs java.net
-- [ ] Binary data handling approach
-- [ ] Temporary file management strategy
-
-### Future Decisions
-- [ ] Partition count strategy
-- [ ] Sampling size/method
-- [ ] Thread pool sizing
-- [ ] Fault tolerance mechanism
-
----
-
-## Architecture Notes (Initial)
-
-### High-Level Flow
 ```
-1. Workers → Master: Send sample data
-2. Master: Calculate partition boundaries
-3. Master → Workers: Broadcast partition info
-4. Workers: Sort local data, partition by ranges
-5. Workers ↔ Workers: Shuffle partitions
-6. Workers: Merge and write final output
+1. Sampling:        Workers → Master (sample data)
+2. Sort/Partition:  Workers sort locally and partition by key ranges
+3. Shuffle:         Workers ↔ Workers (redistribute partitions)
+4. Merge:           Workers merge and write final sorted output
 ```
 
-### Key Components
-- **Master**: Coordination, partition boundary calculation
-- **Worker**: Sort, partition, shuffle, merge
-- **Communication**: gRPC services for Master-Worker and Worker-Worker
+---
+
+## Architecture
+
+### Master
+
+- Coordinates all workers
+- Calculates partition boundaries from samples
+- Distributes partition ranges to workers
+- Monitors worker status
+
+### Worker
+
+- Reads input data from multiple directories
+- Performs local sorting
+- Partitions data by key ranges
+- Shuffles data with other workers
+- Merges received partitions and writes output
+
+---
+
+## Technology Stack
+
+- **Language**: Scala 2.13
+- **Build Tool**: SBT
+- **Networking**: gRPC + Protocol Buffers
+- **Data Generation**: gensort
+
+---
+
+## Usage
+
+### Start Master
+
+```bash
+master <number_of_workers>
+# Output: Master IP:port and worker IP ordering
+```
+
+### Start Worker
+
+```bash
+worker <master_ip:port> -I <input_dir1> <input_dir2> ... -O <output_dir>
+# Output files: partition.n, partition.n+1, partition.n+2, ...
+```
+
+---
+
+## Project Timeline
+
+| Week | Dates        | Phase                  |
+| ---- | ------------ | ---------------------- |
+| 1-2  | Oct 13-26    | Basic Infrastructure   |
+| 3-4  | Oct 27-Nov 9 | Core Sorting Logic     |
+| 5    | Nov 10-16    | Distributed Operations |
+| 6-7  | Nov 17-30    | Fault Tolerance        |
+| 8    | Dec 1-7      | Testing & Optimization |
+
+### Key Deadlines
+
+- **Nov 16**: Progress Report Due
+- **Week 6**: Progress Presentation
+- **Dec 7**: Final Submission
+- **Week 9**: Final Presentation
+
+---
+
+## Weekly Progress
+
+See detailed progress in [docs/](docs/) folder:
+
+- [Week 1](docs/Week1.md) - Oct 13-19
+- [Week 2](docs/Week2.md) - Oct 20-26
+- ...
+
+---
+
+## Development Principles
+
+- **Correctness** over performance
+- **Simplicity** over premature optimization
+- **Document** all design decisions
+- Test incrementally with small datasets first
 
 ---
 
 ## Resources
-- gensort: http://www.ordinal.com/gensort.html
-- Project specification: [Course website](http://pl.postech.ac.kr/~gla/cs332/schedule.html)
-- gRPC Scala: https://scalapb.github.io/
+
+- **gensort**: http://www.ordinal.com/gensort.html
+- **Project Spec**: [Course Website](http://pl.postech.ac.kr/~gla/cs332/schedule.html)
+- **gRPC Scala**: https://scalapb.github.io/
 
 ---
 
-## Notes
-- Remember: Simplicity first, optimization later
-- Focus on correctness over performance initially
-- Document all design decisions
-- Ask TA for clarification when needed
+## Repository Structure
+
+```
+332project/
+├── src/
+│   ├── main/
+│   │   ├── scala/          # Source code
+│   │   └── protobuf/       # gRPC protocol definitions
+│   └── test/               # Test code
+├── docs/
+│   ├── Week1.md
+│   ├── Week2.md
+│   └── ...
+├── build.sbt
+└── README.md
+```
