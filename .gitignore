@@ -1,0 +1,17 @@
+# build
+target/
+project/target/
+project/project/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# metals / bloop
+.metals/
+.bloop/
+
+# misc
+.DS_Store
+*.log
