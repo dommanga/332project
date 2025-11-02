@@ -1,15 +1,88 @@
 syntax = "proto3";
 
-service MasterService {
-  rpc RegisterWorker(WorkerInfo) returns (RegistrationResponse);
+package rpc;
+
+option java_multiple_files = true;
+option java_package = "rpc";
+
+// ---------- Common Types ----------
+message Ack {
+  bool ok = 1;
+  string msg = 2;
 }
 
 message WorkerInfo {
-  string id = 1;
-  string ip = 2;
+  string id   = 1;   // Worker Identifier
+  string ip = 2;                    // Worker IP address
+  int32 port = 3;                   // Worker gRPC port
+  repeated string input_dirs = 4;   // Input directories (from -I flag)
+  string output_dir = 5;            // Output directory (from -O flag)
 }
 
-message RegistrationResponse {
-  bool success = 1;
-  string message = 2;
+message WorkerAssignment {
+  bool success = 1;                 // Registration success
+  string message = 2;               // Response message
+  int32 worker_id = 3;              // Assigned worker ID (0, 1, 2, ...)
+  repeated int32 partition_ids = 4; // Partition IDs to handle (for later)
+}
+
+// ---------- Sampling ----------
+message Sample { bytes key = 1; }                 // 10B
+message Splitters { repeated bytes key = 1; }     // k-1 splitter keys
+
+// ---------- Partition (master -> worker) ----------
+message TaskId { string id = 1; }
+
+message PartitionRange {
+  bytes lo = 1;             // inclusive
+  bytes hi = 2;             // exclusive
+  int32 target_worker = 3;  // Destination worker ID
+}
+
+message PartitionPlan {
+  TaskId task = 1;
+  repeated PartitionRange ranges = 2;
+}
+
+// ---------- Shuffle(worker -> worker) ----------
+
+message PartitionChunk {
+  TaskId task = 1;
+  string partition_id = 2;  // e.g., "p0" 
+  bytes payload = 3;        // Multiple 100-byte records
+  int64 seq = 4;            // Sequence number for ordering/retries
+}
+
+message StreamDone {
+  TaskId task = 1;
+  string partition_id = 2;
+  string checksum = 3;
+}
+message BlockMeta {
+  string block_id = 1;
+  string path = 2;
+  int64  size = 3;
+}
+
+// ---------- Services ----------
+// (Called by workers against the master)
+service MasterService {
+  // Week 3: Worker registration
+  rpc RegisterWorker(WorkerInfo) returns (WorkerAssignment);
+
+  // Week 4: Heartbeat and sampling
+  rpc Heartbeat(WorkerInfo) returns (Ack);
+  rpc SendSamples(stream Sample) returns (Splitters);
+
+  // Week 5+: To be implemented
+  // rpc ReportProgress(ProgressUpdate) returns (Ack);
+}
+
+// (Called by the master/workers against a worker)
+service WorkerService {
+  // Week 4+: Partition plan distribution
+  rpc SetPartitionPlan(PartitionPlan) returns (Ack);
+
+  // Week 5: Shuffle - receive partition data
+  rpc PushPartition(stream PartitionChunk) returns (Ack);
 }
