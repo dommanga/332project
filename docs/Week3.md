@@ -24,19 +24,22 @@
   - `.gitignore`, initial `sort.proto`, mock runMain entries
   - `master.MasterServer`, `worker.WorkerClient` (mock logs)
 - Verified test runner with `ExampleSpec.scala`
-
-#### 3. Common Utilities & Mock Components (Jimi)
-
 - Implemented `common/RecordIO.scala`
   - 100-byte record streaming I/O
   - 10-byte **unsigned** lexicographic key compare
-- Added domain traits (pre-gRPC adapter)
-  - `rpc/MasterApi.scala`, `rpc/WorkerApi.scala`
-- Mock flow for local checks
-  - Master: `DummyMaster.scala`, `DemoRegister.scala`
-  - Worker: `DummyWorker.scala`, `DemoHeartbeat.scala`
-- Unit tests
-  - `KeyCompareSpec.scala` (unsigned compare) — **passing**
+
+#### 3. Master & Worker Implementation (Jimi)
+
+- WorkerClient gRPC implementation
+- Command-line argument parsing (-I, -O)
+- Master registration via gRPC
+
+- Test
+  Master + 2 Workers successfully connected:
+
+  Master: 172.30.1.51:5000
+  Worker 0: Partitions 0, 1, 2
+  Worker 1: Partitions 3, 4, 5
 
 #### 4. Documentation & Repo Hygiene
 
@@ -49,7 +52,6 @@ sbt -Dsbt.global.base="$HOME/.sbt-global-clean" "runMain master.MasterServer"
 sbt -Dsbt.global.base="$HOME/.sbt-global-clean" "runMain worker.WorkerClient"
 sbt -Dsbt.global.base="$HOME/.sbt-global-clean" test
 ```
-
 
 ## Challenges/Issues
 
@@ -137,7 +139,7 @@ service WorkerService {
 }
 ```
 
-### Key Comparison Implementation Plan
+### Key Comparison Implementation
 
 ```
 // 10-byte unsigned lexicographic compare
@@ -152,6 +154,7 @@ def compareKeys(a: Array[Byte], b: Array[Byte]): Int = {
   0
 }
 ```
+
 ### Record Reading Strategy
 
 ```
@@ -164,4 +167,3 @@ while (input.read(buf) == recordSize) {
   // Process record...
 }
 ```
-
