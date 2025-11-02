@@ -7,6 +7,7 @@ project/project/
 .idea/
 .vscode/
 *.iml
+out/
 
 # metals / bloop
 .metals/
@@ -14,4 +15,10 @@ project/project/
 
 # misc
 .DS_Store
+Thumbs.db
 *.log
+
+# JDK
+.jdks/
+
+.bsp/
