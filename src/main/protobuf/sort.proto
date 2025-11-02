@@ -1,15 +1,71 @@
 syntax = "proto3";
+package sort;
 
-service MasterService {
-  rpc RegisterWorker(WorkerInfo) returns (RegistrationResponse);
+// ---------- Common Types ----------
+message Ack {
+  bool ok = 1;
+  string msg = 2;
 }
 
 message WorkerInfo {
-  string id = 1;
-  string ip = 2;
+  string id   = 1;   // Worker Identifier
+  string host = 2;   // Worker gRPC host
+  int32  port = 3;   // Worker gRPC port
 }
 
 message RegistrationResponse {
   bool success = 1;
   string message = 2;
+  int32 worker_index = 3; // Assigned by master
+}
+
+message TaskId { string id = 1; }
+message BlockMeta {
+  string block_id = 1;
+  string path     = 2;
+  int64  size     = 3;
+}
+
+// ---------- Sampling ----------
+message Sample { bytes key = 1; }                 // 10B
+message Splitters { repeated bytes key = 1; }     // k-1 splitter keys
+
+// ---------- Partition (master -> worker) ----------
+message PartitionRange {
+  bytes lo = 1;             // inclusive
+  bytes hi = 2;             // exclusive
+  int32 target_worker = 3;  // Destination worker
+}
+message PartitionPlan {
+  TaskId task = 1;
+  repeated PartitionRange ranges = 2;
+}
+
+// ---------- Shuffle(worker -> worker) ----------
+message PartitionChunk {
+  TaskId task = 1;
+  string partition_id = 2;  // e.g., "p0" 
+  bytes payload = 3;        // Multiple 100-byte records
+  int64 seq = 4;            // Sequence number for ordering/retries
+}
+message StreamDone {
+  TaskId task       = 1;
+  string partition_id = 2;
+  string checksum   = 3;  
+}
+
+// ---------- Services ----------
+// (Called by workers against the master)
+service MasterService {
+
+  rpc RegisterWorker(WorkerInfo) returns (RegistrationResponse);
+  rpc Heartbeat(WorkerInfo) returns (Ack);
+  rpc SendSamples(stream Sample) returns (Splitters);
+}
+
+// (Called by the master/workers against a worker)
+service WorkerService {
+
+  rpc SetPartitionPlan(PartitionPlan) returns (Ack);
+  rpc PushPartition(stream PartitionChunk) returns (Ack);
 }
