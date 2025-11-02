@@ -1,9 +1,10 @@
 package master
 
 import io.grpc.{Server, ServerBuilder}
-import rpc.sorting.{MasterServiceGrpc, WorkerInfo, WorkerAssignment}
+import rpc.sort.{MasterServiceGrpc, WorkerInfo, WorkerAssignment, Ack, Sample, Splitters}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.collection.mutable
+import io.grpc.stub.StreamObserver
 
 object MasterServer {
   def main(args: Array[String]): Unit = {
@@ -88,14 +89,16 @@ class MasterServiceImpl(expectedWorkers: Int)(implicit ec: ExecutionContext)
 
       workers += request
 
-      println(s"Worker registered: ${request.ip} -> Worker #$workerId")
+      val displayName = if (request.id.nonEmpty) request.id else request.ip
+      println(s"Worker registered: $displayName -> Worker #$workerId")
 
       // Check if all workers connected
       if (workers.size == expectedWorkers) {
         println("\nAll workers connected!")
         println("Worker ordering:")
         workers.zipWithIndex.foreach { case (w, idx) =>
-          println(s"  ${idx + 1}. ${w.ip}")
+          val name = if (w.id.nonEmpty) w.id else w.ip
+          println(s"  ${idx + 1}. $name")
         }
       } else {
         println(s"Waiting for ${expectedWorkers - workers.size} more workers...")
@@ -106,10 +109,42 @@ class MasterServiceImpl(expectedWorkers: Int)(implicit ec: ExecutionContext)
 
       Future.successful(
         WorkerAssignment(
+          success = true,
+          message = "Registration successful",
           workerId = workerId,
           partitionIds = partitions
         )
       )
+    }
+  }
+
+  // Week 4: Heartbeat (dummy)
+  override def heartbeat(request: WorkerInfo): Future[Ack] = {
+    // TODO: Week 4 implementation
+    println(s"Heartbeat received from ${request.id}")
+    Future.successful(Ack(ok = true, msg = "Heartbeat received"))
+  }
+
+  // Week 4: SendSamples (dummy)
+  override def sendSamples(
+                            responseObserver: StreamObserver[Splitters]
+                          ): StreamObserver[Sample] = {
+    // TODO: Week 4 implementation
+    new StreamObserver[Sample] {
+      override def onNext(sample: Sample): Unit = {
+        println(s"Sample received: ${sample.key.size()} bytes")
+      }
+
+      override def onError(t: Throwable): Unit = {
+        println(s"Error receiving samples: ${t.getMessage}")
+      }
+
+      override def onCompleted(): Unit = {
+        println("All samples received")
+        // TODO: Calculate splitters
+        responseObserver.onNext(Splitters(Seq.empty))
+        responseObserver.onCompleted()
+      }
     }
   }
 }

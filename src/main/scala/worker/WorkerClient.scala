@@ -1,7 +1,7 @@
 package worker
 
 import io.grpc.{ManagedChannel, ManagedChannelBuilder}
-import rpc.sorting.{MasterServiceGrpc, WorkerInfo}
+import rpc.sort.{MasterServiceGrpc, WorkerInfo}
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
 import scala.util.{Try, Success, Failure}
@@ -32,6 +32,7 @@ object WorkerClient {
       // Register with Master
       val localIP = getLocalIP()
       val request = WorkerInfo(
+        id = "",
         ip = localIP,
         port = 0,  // Week 3: Worker doesn't serve yet
         inputDirs = inputDirs,
