@@ -77,7 +77,7 @@ worker <master_ip:port> -I <input_dir1> <input_dir2> ... -O <output_dir>
 
 ## Project Timeline
 
-| Week | Dates        | Phase                  |
+| Week | Dates        | Milestone              |
 | ---- | ------------ | ---------------------- |
 | 1-2  | Oct 13-26    | Basic Infrastructure   |
 | 3-4  | Oct 27-Nov 9 | Core Sorting Logic     |
