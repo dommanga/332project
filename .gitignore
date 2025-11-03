@@ -22,3 +22,14 @@ Thumbs.db
 .jdks/
 
 .bsp/
+# Test data and binaries
+gensort
+valsort
+gensort-*.tar.gz
+gensort-*/
+*.dat
+
+# Input/Output directories
+input*/
+output*/
+test_*/
