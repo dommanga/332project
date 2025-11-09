@@ -1,5 +1,8 @@
 package worker
 
+import rpc.sort.WorkerInfo
+import scala.concurrent.ExecutionContext
+
 final case class WorkerConfig(
                                masterHost: String,
                                masterPort: Int,
@@ -11,6 +14,8 @@ final case class WorkerConfig(
 
 object WorkerClient extends App {
 
+  implicit val ec: ExecutionContext = ExecutionContext.global
+
   parseArgs(args) match {
     case Some(conf) =>
       println("✅ Worker started with config:")
@@ -20,14 +25,49 @@ object WorkerClient extends App {
       println(s"  id       = ${conf.workerId}")
       println(s"  port     = ${conf.workerPort}")
 
-      // --- Week4: 샘플링 테스트 ---
-      val samples = common.Sampling.uniformEveryN(conf.inputPaths, everyN = 1000)
-      println(s"  collected ${samples.size} sample keys (every 1000th record)")
-    // TODO(다음 단계):
-    //   - samples 를 Master에 gRPC client-streaming으로 전송
+      // Master 클라이언트 생성
+      val masterClient = new MasterClient(conf.masterHost, conf.masterPort)
+
+      try {
+        // 1. Master에 등록
+        val workerInfo = WorkerInfo(
+          id = conf.workerId,
+          ip = getLocalIP(),
+          port = conf.workerPort,
+          inputDirs = conf.inputPaths,
+          outputDir = conf.outputDir
+        )
+
+        val assignment = masterClient.register(workerInfo)
+        println(s"   assigned partitions: ${assignment.partitionIds.mkString("[", ", ", "]")}")
+
+        // 2. 샘플링
+        val samples = common.Sampling.uniformEveryN(conf.inputPaths, everyN = 1000)
+        println(s"  collected ${samples.size} sample keys (every 1000th record)")
+
+        // 3. 샘플 전송
+        val splitters = masterClient.sendSamples(samples)
+        println(s"  received ${splitters.key.size} splitters from Master")
+
+        // TODO Week 5: 실제 정렬 & 파티셔닝
+
+      } finally {
+        masterClient.shutdown()
+      }
 
     case None =>
       sys.exit(1)
+  }
+
+  private def getLocalIP(): String = {
+    import java.net.{InetAddress, NetworkInterface}
+    import scala.jdk.CollectionConverters._
+
+    NetworkInterface.getNetworkInterfaces.asScala
+      .flatMap(_.getInetAddresses.asScala)
+      .find(addr => !addr.isLoopbackAddress && addr.getAddress.length == 4)
+      .map(_.getHostAddress)
+      .getOrElse("127.0.0.1")
   }
 
   // ---------------------------
