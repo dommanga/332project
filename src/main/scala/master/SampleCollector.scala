@@ -7,6 +7,10 @@ trait SampleCollector {
   def collectAllSamples(): Array[Array[Byte]]
 }
 
+trait SplitterCalculator {
+  def calculate(samples: Array[Array[Byte]], numWorkers: Int): Array[Array[Byte]]
+}
+
 class SampleCollectorImpl(expectedWorkers: Int) extends SampleCollector {
 
   // Sample buffer for each Worker: WorkerId -> List[Key]
