@@ -39,40 +39,47 @@ class WorkerServer(port: Int) {
 
 class WorkerServiceImpl(implicit ec: ExecutionContext)
   extends WorkerServiceGrpc.WorkerService {
-
-  override def setPartitionPlan(plan: PartitionPlan): Future[Ack] = {
-    println(s"[Worker] Received PartitionPlan for task=${plan.task.map(_.id).getOrElse("unknown")}")
-    plan.ranges.zipWithIndex.foreach { case (r, idx) =>
-      println(f"  range#$idx → worker=${r.targetWorker}%d, " +
-        s"lo=${bytesToHex(r.lo.toByteArray)} hi=${bytesToHex(r.hi.toByteArray)}")
+    object PlanStore {
+        @volatile private var latest: Option[PartitionPlan] = None
+        def set(p: PartitionPlan): Unit = latest = Some(p)
+        def get: Option[PartitionPlan] = latest
     }
-    Future.successful(Ack(ok = true, msg = "Plan received"))
-  }
-  override def pushPartition(responseObserver: StreamObserver[Ack]): StreamObserver[PartitionChunk] = {
-    new StreamObserver[PartitionChunk] {
-      private var count: Long = 0L
-      private var lastPid: String = ""
-      private var lastSeq: Long = -1L
 
-      override def onNext(ch: PartitionChunk): Unit = {
-        // 여기서 payload를 파일/버퍼에 쓰도록 확장 가능
-        count += 1
-        lastPid = ch.partitionId
-        lastSeq = ch.seq
-      }
-      override def onError(t: Throwable): Unit = {
-        System.err.println(s"[Worker] pushPartition stream error: ${t.getMessage}")
-      }
 
-      override def onCompleted(): Unit = {
-        println(s"[Worker] pushPartition completed: partition=$lastPid chunks=$count lastSeq=$lastSeq")
-        responseObserver.onNext(Ack(ok = true, msg = s"received $count chunks for $lastPid"))
-        responseObserver.onCompleted()
-      }
+    override def setPartitionPlan(plan: PartitionPlan): Future[Ack] = {
+        println(s"[Worker] Received PartitionPlan for task=${plan.task.map(_.id).getOrElse("unknown")}")
+        plan.ranges.zipWithIndex.foreach { case (r, idx) =>
+        println(f"  range#$idx → worker=${r.targetWorker}%d, " +
+            s"lo=${bytesToHex(r.lo.toByteArray)} hi=${bytesToHex(r.hi.toByteArray)}")
+        }
+        PlanStore.set(plan)
+        Future.successful(Ack(ok = true, msg = "Plan received"))
     }
-  }
+    override def pushPartition(responseObserver: StreamObserver[Ack]): StreamObserver[PartitionChunk] = {
+        new StreamObserver[PartitionChunk] {
+        private var count: Long = 0L
+        private var lastPid: String = ""
+        private var lastSeq: Long = -1L
 
-  // Byte array → hex 문자열
-  private def bytesToHex(arr: Array[Byte]): String =
-    arr.map("%02X".format(_)).mkString
+        override def onNext(ch: PartitionChunk): Unit = {
+            // 여기서 payload를 파일/버퍼에 쓰도록 확장 가능
+            count += 1
+            lastPid = ch.partitionId
+            lastSeq = ch.seq
+        }
+        override def onError(t: Throwable): Unit = {
+            System.err.println(s"[Worker] pushPartition stream error: ${t.getMessage}")
+        }
+
+        override def onCompleted(): Unit = {
+            println(s"[Worker] pushPartition completed: partition=$lastPid chunks=$count lastSeq=$lastSeq")
+            responseObserver.onNext(Ack(ok = true, msg = s"received $count chunks for $lastPid"))
+            responseObserver.onCompleted()
+        }
+        }
+    }
+
+    // Byte array → hex 문자열
+    private def bytesToHex(arr: Array[Byte]): String =
+        arr.map("%02X".format(_)).mkString
 }
