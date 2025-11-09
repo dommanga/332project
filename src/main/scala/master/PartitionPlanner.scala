@@ -23,7 +23,7 @@ object PartitionPlanner {
     }.toIndexedSeq
 
     PartitionPlan(
-      task   = Some(TaskId("task-001")), // ← Option으로 감싸기
+      task   = Some(TaskId("task-001")),
       ranges = ranges
     )
   }
