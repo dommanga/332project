@@ -81,6 +81,8 @@ class MasterServiceImpl(expectedWorkers: Int)(implicit ec: ExecutionContext)
 
   private val workers = mutable.ListBuffer[WorkerInfo]()
   private var nextWorkerId = 0
+  private val sampling = new SamplingCoordinator(expectedWorkers)
+  private val nextSamplesWorker = new java.util.concurrent.atomic.AtomicInteger(0)
 
   override def registerWorker(request: WorkerInfo): Future[WorkerAssignment] = {
     synchronized {
@@ -107,6 +109,8 @@ class MasterServiceImpl(expectedWorkers: Int)(implicit ec: ExecutionContext)
       // Assign partitions (dummy for now, Week 4+)
       val partitions = (workerId * 3 until (workerId + 1) * 3).toSeq
 
+      // (선택) 나중에 peer-IP 매칭용으로 저장할 수도 있음
+      // workerIdByIp.update(request.ip, workerId)
       Future.successful(
         WorkerAssignment(
           success = true,
@@ -126,24 +130,41 @@ class MasterServiceImpl(expectedWorkers: Int)(implicit ec: ExecutionContext)
   }
 
   // Week 4: SendSamples (dummy)
-  override def sendSamples(
-                            responseObserver: StreamObserver[Splitters]
-                          ): StreamObserver[Sample] = {
-    // TODO: Week 4 implementation
+  override def sendSamples(responseObserver: StreamObserver[Splitters]): StreamObserver[Sample] = {
+    val workerId: Int = nextSamplesWorker.getAndIncrement()
+
     new StreamObserver[Sample] {
       override def onNext(sample: Sample): Unit = {
-        println(s"Sample received: ${sample.key.size()} bytes")
+        // 샘플의 key 바이트 복사해서 수집기에 전달
+        val arr: Array[Byte] = sample.key.toByteArray
+        sampling.submit(workerId, arr)
       }
 
       override def onError(t: Throwable): Unit = {
-        println(s"Error receiving samples: ${t.getMessage}")
+        println(s"[sendSamples] stream error from worker#$workerId: ${t.getMessage}")
       }
 
       override def onCompleted(): Unit = {
-        println("All samples received")
-        // TODO: Calculate splitters
-        responseObserver.onNext(Splitters(Seq.empty))
+        // 이 워커의 샘플 스트림 종료 표시
+        sampling.complete(workerId)
+
+        // (간단 대기) 모든 워커 스트림이 끝나 스플리터가 준비될 때까지 최대 30초 대기
+        val deadlineNanos = System.nanoTime() + 30_000_000_000L // 30s
+        while (!sampling.isReady && System.nanoTime() < deadlineNanos) {
+          Thread.sleep(50)
+        }
+
+        // 준비된 splitters를 응답으로 전송
+        val splittersArr = sampling.splitters
+        val resp = Splitters(
+          splittersArr.map(com.google.protobuf.ByteString.copyFrom).toIndexedSeq
+        )
+
+        responseObserver.onNext(resp)
         responseObserver.onCompleted()
+
+        println(s"[sendSamples] worker#$workerId completed. " +
+          s"splitters_ready=${splittersArr.nonEmpty} count=${splittersArr.length}")
       }
     }
   }
