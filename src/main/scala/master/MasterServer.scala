@@ -3,6 +3,7 @@ package master
 import io.grpc.{Server, ServerBuilder}
 import rpc.sort.{MasterServiceGrpc, WorkerInfo, WorkerAssignment, Ack, Sample, Splitters}
 import scala.concurrent.{ExecutionContext, Future}
+import scala.collection.mutable
 import io.grpc.stub.StreamObserver
 
 object MockSplitterCalculator extends SplitterCalculator {
@@ -22,9 +23,11 @@ object MasterServer {
     val numWorkers = args(0).toInt
     val port = 5000
 
+    // Start gRPC server
     val server = new MasterServer(port, numWorkers)
     server.start()
 
+    // Print master address
     val localIP = getLocalIP()
     println("=" * 60)
     println(s"   Master Server Started")
@@ -32,9 +35,11 @@ object MasterServer {
     println(s"   Expected Workers: $numWorkers")
     println("=" * 60)
 
+    // Wait for shutdown
     server.blockUntilShutdown()
   }
 
+  // Get local IP address
   private def getLocalIP(): String = {
     import java.net.{InetAddress, NetworkInterface}
     import scala.jdk.CollectionConverters._
@@ -52,14 +57,9 @@ class MasterServer(port: Int, expectedWorkers: Int) {
   private implicit val ec: ExecutionContext = ExecutionContext.global
 
   private val registry = new WorkerRegistry()
-  private val sampleCollector = new SampleCollectorImpl(expectedWorkers)
-  private val splitterCalculator = MockSplitterCalculator
+  private val sampling = new SamplingCoordinator(expectedWorkers)
+  private val serviceImpl = new MasterServiceImpl(registry, sampling)
 
-  private val serviceImpl = new MasterServiceImpl(
-    registry,
-    sampleCollector,
-    splitterCalculator
-  )
 
   def start(): Unit = {
     server = ServerBuilder
@@ -100,15 +100,32 @@ class MasterServer(port: Int, expectedWorkers: Int) {
   }
 }
 
-class MasterServiceImpl(
-                         registry: WorkerRegistry,
-                         sampleCollector: SampleCollectorImpl,
-                         splitterCalculator: SplitterCalculator
-                       )(implicit ec: ExecutionContext) extends MasterServiceGrpc.MasterService {
+// gRPC service implementation
+class MasterServiceImpl(registry: WorkerRegistry, sampling: SamplingCoordinator)(implicit ec: ExecutionContext)
+  extends MasterServiceGrpc.MasterService {
+
+  private val nextSamplesWorker = new java.util.concurrent.atomic.AtomicInteger(0)
 
   override def registerWorker(request: WorkerInfo): Future[WorkerAssignment] = {
     Future {
-      registry.register(request)
+      val assignment = registry.register(request)
+
+      val dummyPartitions = (assignment.workerId * 3 until (assignment.workerId + 1) * 3).toSeq
+      val assignmentWithPartitions = assignment.copy(partitionIds = dummyPartitions)
+
+      // 전체 Worker 연결 체크
+      if (registry.size == sampling.expectedWorkers) {
+        println("\nAll workers connected!")
+        println("Worker ordering:")
+        registry.getAllWorkers.sortBy(_.id).foreach { w =>
+          val name = if (w.workerInfo.id.nonEmpty) w.workerInfo.id else w.workerInfo.ip
+          println(s"  ${w.id + 1}. $name")
+        }
+      } else {
+        println(s"Waiting for ${sampling.expectedWorkers - registry.size} more workers...")
+      }
+
+      assignmentWithPartitions
     }
   }
 
@@ -118,48 +135,42 @@ class MasterServiceImpl(
     }
   }
 
+  // Week 4: SendSamples
   override def sendSamples(responseObserver: StreamObserver[Splitters]): StreamObserver[Sample] = {
-
-    var workerId: String = null
+    val workerId: Int = nextSamplesWorker.getAndIncrement()
 
     new StreamObserver[Sample] {
       override def onNext(sample: Sample): Unit = {
-        val keyBytes = sample.key.toByteArray
-
-        if (workerId == null) {
-          workerId = "worker-" + System.currentTimeMillis()
-        }
-
-        sampleCollector.addSample(workerId, keyBytes)
+        // 샘플의 key 바이트 복사해서 수집기에 전달
+        val arr: Array[Byte] = sample.key.toByteArray
+        sampling.submit(workerId, arr)
       }
 
       override def onError(t: Throwable): Unit = {
-        Console.err.println(s"Error receiving samples: ${t.getMessage}")
+        Console.err.println(s"[sendSamples] stream error from worker#$workerId: ${t.getMessage}")
       }
 
       override def onCompleted(): Unit = {
-        sampleCollector.markWorkerComplete(workerId)
+        // 이 워커의 샘플 스트림 종료 표시
+        sampling.complete(workerId)
 
-        if (sampleCollector.isAllWorkersComplete) {
-          println("All workers completed sampling. Calculating splitters...")
-          sampleCollector.printStats()
-
-          val allSamples = sampleCollector.collectAllSamples()
-          val numWorkers = registry.size
-
-          val splitterKeys = splitterCalculator.calculate(allSamples, numWorkers)
-
-          val splitters = Splitters(
-            key = splitterKeys.map(k => com.google.protobuf.ByteString.copyFrom(k)).toSeq
-          )
-
-          responseObserver.onNext(splitters)
-        } else {
-          println(s"Waiting for more workers... (${sampleCollector.collectAllSamples().length} samples so far)")
-          responseObserver.onNext(Splitters(key = Seq.empty))
+        // (간단 대기) 모든 워커 스트림이 끝나 스플리터가 준비될 때까지 최대 30초 대기
+        val deadlineNanos = System.nanoTime() + 30_000_000_000L // 30s
+        while (!sampling.isReady && System.nanoTime() < deadlineNanos) {
+          Thread.sleep(50)
         }
 
+        // 준비된 splitters를 응답으로 전송
+        val splittersArr = sampling.splitters
+        val resp = Splitters(
+          key = splittersArr.map(com.google.protobuf.ByteString.copyFrom).toIndexedSeq
+        )
+
+        responseObserver.onNext(resp)
         responseObserver.onCompleted()
+
+        println(s"[sendSamples] worker#$workerId completed. " +
+          s"splitters_ready=${splittersArr.nonEmpty} count=${splittersArr.length}")
       }
     }
   }
