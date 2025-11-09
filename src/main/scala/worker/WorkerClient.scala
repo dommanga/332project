@@ -1,13 +1,13 @@
 package worker
 
 final case class WorkerConfig(
-  masterHost: String,
-  masterPort: Int,
-  inputPaths: Seq[String],
-  outputDir: String,
-  workerId: String,
-  workerPort: Int
-)
+                               masterHost: String,
+                               masterPort: Int,
+                               inputPaths: Seq[String],
+                               outputDir: String,
+                               workerId: String,
+                               workerPort: Int
+                             )
 
 object WorkerClient extends App {
 
@@ -21,10 +21,10 @@ object WorkerClient extends App {
       println(s"  port     = ${conf.workerPort}")
 
       // --- Week4: 샘플링 테스트 ---
-      val samples = Sampling.sampleKeysEveryN(conf.inputPaths, step = 1000)
+      val samples = common.Sampling.uniformEveryN(conf.inputPaths, everyN = 1000)
       println(s"  collected ${samples.size} sample keys (every 1000th record)")
-      // TODO(다음 단계):
-      //   - samples 를 Master에 gRPC client-streaming으로 전송
+    // TODO(다음 단계):
+    //   - samples 를 Master에 gRPC client-streaming으로 전송
 
     case None =>
       sys.exit(1)
