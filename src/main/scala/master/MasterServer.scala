@@ -1,7 +1,11 @@
 package master
 
-import io.grpc.{Server, ServerBuilder}
-import rpc.sort.{MasterServiceGrpc, WorkerInfo, WorkerAssignment, Ack, Sample, Splitters}
+import io.grpc.{Server, ServerBuilder, ManagedChannelBuilder}
+import rpc.sort.{
+  MasterServiceGrpc, WorkerInfo, WorkerAssignment, Ack, 
+  Sample, Splitters, PartitionPlan, WorkerServiceGrpc
+}
+import master.PartitionPlanner
 import scala.concurrent.{ExecutionContext, Future}
 import scala.collection.mutable
 import io.grpc.stub.StreamObserver
@@ -101,20 +105,25 @@ class MasterServer(port: Int, expectedWorkers: Int) {
 }
 
 // gRPC service implementation
-class MasterServiceImpl(registry: WorkerRegistry, sampling: SamplingCoordinator)(implicit ec: ExecutionContext)
+class MasterServiceImpl(
+  registry: WorkerRegistry, 
+  sampling: SamplingCoordinator
+)(implicit ec: ExecutionContext)
   extends MasterServiceGrpc.MasterService {
 
   private val nextSamplesWorker = new java.util.concurrent.atomic.AtomicInteger(0)
+  @volatile private var planBroadcasted = false 
+  private def expectedWorkers: Int = sampling.expectedWorkers
+
 
   override def registerWorker(request: WorkerInfo): Future[WorkerAssignment] = {
     Future {
       val assignment = registry.register(request)
-
       val dummyPartitions = (assignment.workerId * 3 until (assignment.workerId + 1) * 3).toSeq
       val assignmentWithPartitions = assignment.copy(partitionIds = dummyPartitions)
 
       // 전체 Worker 연결 체크
-      if (registry.size == sampling.expectedWorkers) {
+      if (registry.size == expectedWorkers) {
         println("\nAll workers connected!")
         println("Worker ordering:")
         registry.getAllWorkers.sortBy(_.id).foreach { w =>
@@ -132,6 +141,9 @@ class MasterServiceImpl(registry: WorkerRegistry, sampling: SamplingCoordinator)
   override def heartbeat(request: WorkerInfo): Future[Ack] = {
     Future {
       registry.updateHeartbeat(request)
+      val who = if (request.id.nonEmpty) request.id else s"${request.ip}:${request.port}"
+      println(s"Heartbeat received from $who")
+      Ack(ok = true, msg = "Heartbeat received")
     }
   }
 
@@ -171,6 +183,25 @@ class MasterServiceImpl(registry: WorkerRegistry, sampling: SamplingCoordinator)
 
         println(s"[sendSamples] worker#$workerId completed. " +
           s"splitters_ready=${splittersArr.nonEmpty} count=${splittersArr.length}")
+        if (sampling.isReady && !planBroadcasted){
+          planBroadcasted = true
+          val plan = PartitionPlanner.createPlan(splittersArr, expectedWorkers)
+          println(s"[Master] Broadcasting PartitionPlan to $expectedWorkers workers...")
+
+          registry.getAllWorkers.foreach { w =>
+            val target = s"${w.workerInfo.ip}:${w.workerInfo.port}" 
+            try {
+              val ch = io.grpc.ManagedChannelBuilder.forTarget(target).usePlaintext().build()
+              val stub = WorkerServiceGrpc.blockingStub(ch)
+              val ack = stub.setPartitionPlan(plan)
+              println(s"  → worker#${w.id} (${w.workerInfo.ip}) ack=${ack.ok}")
+              ch.shutdown()
+            } catch {
+              case e: Exception => 
+                println(s"  ✗ Failed to send plan to ${w.workerInfo.ip}: ${e.getMessage}")
+            }
+          }
+        }
       }
     }
   }
