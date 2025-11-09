@@ -1,102 +1,134 @@
 package worker
 
-import io.grpc.{ManagedChannel, ManagedChannelBuilder}
-import rpc.sort.{MasterServiceGrpc, WorkerInfo}
-import scala.concurrent.{Await, ExecutionContext}
-import scala.concurrent.duration._
-import scala.util.{Try, Success, Failure}
+final case class WorkerConfig(
+  masterHost: String,
+  masterPort: Int,
+  inputPaths: Seq[String],
+  outputDir: String,
+  workerId: String,
+  workerPort: Int
+)
 
-object WorkerClient {
-  implicit val ec: ExecutionContext = ExecutionContext.global
+object WorkerClient extends App {
 
-  def main(args: Array[String]): Unit = {
-    // Parse command line arguments
-    if (args.length < 2) {
-      println("Usage: worker <master_ip:port> -I <input_dir1> <input_dir2> ... -O <output_dir>")
-      System.exit(1)
+  parseArgs(args) match {
+    case Some(conf) =>
+      println("✅ Worker started with config:")
+      println(s"  master   = ${conf.masterHost}:${conf.masterPort}")
+      println(s"  inputs   = ${conf.inputPaths.mkString(", ")}")
+      println(s"  output   = ${conf.outputDir}")
+      println(s"  id       = ${conf.workerId}")
+      println(s"  port     = ${conf.workerPort}")
+
+      // --- Week4: 샘플링 테스트 ---
+      val samples = Sampling.sampleKeysEveryN(conf.inputPaths, step = 1000)
+      println(s"  collected ${samples.size} sample keys (every 1000th record)")
+      // TODO(다음 단계):
+      //   - samples 를 Master에 gRPC client-streaming으로 전송
+
+    case None =>
+      sys.exit(1)
+  }
+
+  // ---------------------------
+  // 아래는 단순 CLI 파서
+  // ---------------------------
+  private def parseArgs(args: Array[String]): Option[WorkerConfig] = {
+    if (args.isEmpty) {
+      printUsage()
+      return None
     }
 
-    val masterAddr = args(0)  // "192.168.1.1:5000"
-    val (inputDirs, outputDir) = parseArgs(args.drop(1))
+    var masterHost = "localhost"
+    var masterPort = 5000
+    val inputs     = collection.mutable.ArrayBuffer.empty[String]
+    var outputDir  = "./out"
+    var workerId   = "worker-1"
+    var workerPort = 6000
 
-    println(s"Worker starting...")
-    println(s"Master address: $masterAddr")
-    println(s"Input directories: ${inputDirs.mkString(", ")}")
-    println(s"Output directory: $outputDir")
+    var i = 0
+    def needValue(opt: String): Boolean = {
+      if (i >= args.length) {
+        Console.err.println(s"Missing value for $opt")
+        false
+      } else true
+    }
 
-    // Connect to Master
-    val channel = createChannel(masterAddr)
-    val stub = MasterServiceGrpc.blockingStub(channel)
+    while (i < args.length) {
+      args(i) match {
+        case "--master" =>
+          i += 1
+          if (!needValue("--master")) return None
+          val hp = args(i).split(":", 2)
+          if (hp.length != 2 || !hp(1).forall(_.isDigit)) {
+            Console.err.println("Invalid --master HOST:PORT")
+            return None
+          }
+          masterHost = hp(0)
+          masterPort = hp(1).toInt
 
-    try {
-      // Register with Master
-      val localIP = getLocalIP()
-      val request = WorkerInfo(
-        id = "",
-        ip = localIP,
-        port = 0,  // Week 3: Worker doesn't serve yet
-        inputDirs = inputDirs,
-        outputDir = outputDir
+        case "-I" | "--input" =>
+          i += 1
+          if (!needValue("-I")) return None
+          inputs += args(i)
+
+        case "-O" | "--output" =>
+          i += 1
+          if (!needValue("-O")) return None
+          outputDir = args(i)
+
+        case "--id" =>
+          i += 1
+          if (!needValue("--id")) return None
+          workerId = args(i)
+
+        case "--port" =>
+          i += 1
+          if (!needValue("--port")) return None
+          workerPort = args(i).toInt
+
+        case other =>
+          Console.err.println(s"Unknown option: $other")
+          printUsage()
+          return None
+      }
+      i += 1
+    }
+
+    if (inputs.isEmpty) {
+      Console.err.println("At least one -I <input-path> is required.")
+      printUsage()
+      None
+    } else {
+      Some(
+        WorkerConfig(
+          masterHost = masterHost,
+          masterPort = masterPort,
+          inputPaths = inputs.toSeq,
+          outputDir  = outputDir,
+          workerId   = workerId,
+          workerPort = workerPort
+        )
       )
-
-      println(s"Registering with Master at $masterAddr...")
-      val response = stub.registerWorker(request)
-
-      println(s"✓ Registration successful!")
-      println(s"  Worker ID: ${response.workerId}")
-      println(s"  Assigned partitions: ${response.partitionIds.mkString(", ")}")
-
-      // Wait for shutdown
-      println("\nWorker registered. Press Enter to exit...")
-      scala.io.StdIn.readLine()
-
-    } catch {
-      case e: Exception =>
-        println(s"✗ Registration failed: ${e.getMessage}")
-        e.printStackTrace()
-    } finally {
-      channel.shutdown()
-      channel.awaitTermination(5, SECONDS)
-      println("Worker shut down.")
     }
   }
 
-  // Parse command line arguments
-  private def parseArgs(args: Array[String]): (Seq[String], String) = {
-    val iIndex = args.indexOf("-I")
-    val oIndex = args.indexOf("-O")
-
-    if (iIndex == -1 || oIndex == -1) {
-      throw new IllegalArgumentException("Missing -I or -O flag")
-    }
-
-    val inputDirs = args.slice(iIndex + 1, oIndex).toSeq
-    val outputDir = args(oIndex + 1)
-
-    if (inputDirs.isEmpty) {
-      throw new IllegalArgumentException("No input directories specified")
-    }
-
-    (inputDirs, outputDir)
-  }
-
-  // Create gRPC channel
-  private def createChannel(target: String): ManagedChannel = {
-    ManagedChannelBuilder
-      .forTarget(target)
-      .usePlaintext()
-      .build()
-  }
-
-  // Get local IP address
-  private def getLocalIP(): String = {
-    import java.net.{InetAddress, NetworkInterface}
-    import scala.jdk.CollectionConverters._
-
-    NetworkInterface.getNetworkInterfaces.asScala
-      .flatMap(_.getInetAddresses.asScala)
-      .find(addr => !addr.isLoopbackAddress && addr.getAddress.length == 4)
-      .map(_.getHostAddress)
-      .getOrElse("127.0.0.1")
+  private def printUsage(): Unit = {
+    val msg =
+      """Usage:
+        |  sbt "runMain worker.WorkerClient --master HOST:PORT \
+        |                               -I INPUT_PATH [-I INPUT_PATH ...] \
+        |                               -O OUTPUT_DIR \
+        |                               --id WORKER_ID \
+        |                               --port PORT"
+        |
+        |Example:
+        |  sbt "runMain worker.WorkerClient --master 127.0.0.1:5000 \
+        |                               -I data/part0 -I data/part1 \
+        |                               -O out \
+        |                               --id worker0 \
+        |                               --port 6000"
+        |""".stripMargin
+    Console.err.println(msg)
   }
 }
