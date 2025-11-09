@@ -25,7 +25,7 @@ class WorkerRegistry {
       lastHeartbeat = Instant.now()
     )
 
-    println(s"✅ Worker registered:")
+    println(s"Worker registered:")
     println(s"   id=$workerId, ip=${info.ip}:${info.port}")
     println(s"   inputs=${info.inputDirs}")
     println(s"   output=${info.outputDir}")
@@ -50,7 +50,7 @@ class WorkerRegistry {
         )
 
       case None =>
-        Console.err.println(s"⚠️  Unknown worker heartbeat: ${info.id}")
+        Console.err.println(s"Unknown worker heartbeat: ${info.id}")
         Ack(
           ok = false,
           msg = s"Unknown worker: ${info.id}"
