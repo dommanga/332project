@@ -6,6 +6,13 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.collection.mutable
 import io.grpc.stub.StreamObserver
 
+object MockSplitterCalculator extends SplitterCalculator {
+  override def calculate(samples: Array[Array[Byte]], numWorkers: Int): Array[Array[Byte]] = {
+    println(s"🔧 [MOCK] Calculating ${numWorkers-1} splitters from ${samples.length} samples")
+    Array.empty[Array[Byte]]
+  }
+}
+
 object MasterServer {
   def main(args: Array[String]): Unit = {
     if (args.length < 1) {
@@ -22,8 +29,11 @@ object MasterServer {
 
     // Print master address
     val localIP = getLocalIP()
-    println(s"Master listening on $localIP:$port")
-    println(s"Waiting for $numWorkers workers to connect...")
+    println("=" * 60)
+    println(s"   Master Server Started")
+    println(s"   Address: $localIP:$port")
+    println(s"   Expected Workers: $numWorkers")
+    println("=" * 60)
 
     // Wait for shutdown
     server.blockUntilShutdown()
@@ -45,19 +55,34 @@ object MasterServer {
 class MasterServer(port: Int, expectedWorkers: Int) {
   private var server: Server = _
   private implicit val ec: ExecutionContext = ExecutionContext.global
-  private val serviceImpl = new MasterServiceImpl(expectedWorkers)
+
+  private val registry = new WorkerRegistry()
+  private val sampling = new SamplingCoordinator(expectedWorkers)
+  private val serviceImpl = new MasterServiceImpl(registry, sampling)
+
 
   def start(): Unit = {
     server = ServerBuilder
       .forPort(port)
-      .addService(MasterServiceGrpc.bindService(serviceImpl, ExecutionContext.global))
+      .addService(MasterServiceGrpc.bindService(serviceImpl, ec))
       .build()
       .start()
 
-    println(s"Server started on port $port")
+    println(s"Server ready. Waiting for workers...\n")
+
+    val pruneThread = new Thread {
+      override def run(): Unit = {
+        while (!Thread.interrupted()) {
+          Thread.sleep(30000)
+          registry.pruneDeadWorkers()
+        }
+      }
+    }
+    pruneThread.setDaemon(true)
+    pruneThread.start()
 
     sys.addShutdownHook {
-      println("Shutting down gRPC server...")
+      println("\nShutting down Master...")
       stop()
     }
   }
@@ -76,60 +101,41 @@ class MasterServer(port: Int, expectedWorkers: Int) {
 }
 
 // gRPC service implementation
-class MasterServiceImpl(expectedWorkers: Int)(implicit ec: ExecutionContext)
+class MasterServiceImpl(registry: WorkerRegistry, sampling: SamplingCoordinator)(implicit ec: ExecutionContext)
   extends MasterServiceGrpc.MasterService {
 
-  private val workers = mutable.ListBuffer[WorkerInfo]()
-  private var nextWorkerId = 0
-  private val sampling = new SamplingCoordinator(expectedWorkers)
   private val nextSamplesWorker = new java.util.concurrent.atomic.AtomicInteger(0)
 
   override def registerWorker(request: WorkerInfo): Future[WorkerAssignment] = {
-    synchronized {
-      val workerId = nextWorkerId
-      nextWorkerId += 1
+    Future {
+      val assignment = registry.register(request)
 
-      workers += request
+      val dummyPartitions = (assignment.workerId * 3 until (assignment.workerId + 1) * 3).toSeq
+      val assignmentWithPartitions = assignment.copy(partitionIds = dummyPartitions)
 
-      val displayName = if (request.id.nonEmpty) request.id else request.ip
-      println(s"Worker registered: $displayName -> Worker #$workerId")
-
-      // Check if all workers connected
-      if (workers.size == expectedWorkers) {
+      // 전체 Worker 연결 체크
+      if (registry.size == sampling.expectedWorkers) {
         println("\nAll workers connected!")
         println("Worker ordering:")
-        workers.zipWithIndex.foreach { case (w, idx) =>
-          val name = if (w.id.nonEmpty) w.id else w.ip
-          println(s"  ${idx + 1}. $name")
+        registry.getAllWorkers.sortBy(_.id).foreach { w =>
+          val name = if (w.workerInfo.id.nonEmpty) w.workerInfo.id else w.workerInfo.ip
+          println(s"  ${w.id + 1}. $name")
         }
       } else {
-        println(s"Waiting for ${expectedWorkers - workers.size} more workers...")
+        println(s"Waiting for ${sampling.expectedWorkers - registry.size} more workers...")
       }
 
-      // Assign partitions (dummy for now, Week 4+)
-      val partitions = (workerId * 3 until (workerId + 1) * 3).toSeq
-
-      // (선택) 나중에 peer-IP 매칭용으로 저장할 수도 있음
-      // workerIdByIp.update(request.ip, workerId)
-      Future.successful(
-        WorkerAssignment(
-          success = true,
-          message = "Registration successful",
-          workerId = workerId,
-          partitionIds = partitions
-        )
-      )
+      assignmentWithPartitions
     }
   }
 
-  // Week 4: Heartbeat (dummy)
   override def heartbeat(request: WorkerInfo): Future[Ack] = {
-    // TODO: Week 4 implementation
-    println(s"Heartbeat received from ${request.id}")
-    Future.successful(Ack(ok = true, msg = "Heartbeat received"))
+    Future {
+      registry.updateHeartbeat(request)
+    }
   }
 
-  // Week 4: SendSamples (dummy)
+  // Week 4: SendSamples
   override def sendSamples(responseObserver: StreamObserver[Splitters]): StreamObserver[Sample] = {
     val workerId: Int = nextSamplesWorker.getAndIncrement()
 
@@ -141,7 +147,7 @@ class MasterServiceImpl(expectedWorkers: Int)(implicit ec: ExecutionContext)
       }
 
       override def onError(t: Throwable): Unit = {
-        println(s"[sendSamples] stream error from worker#$workerId: ${t.getMessage}")
+        Console.err.println(s"[sendSamples] stream error from worker#$workerId: ${t.getMessage}")
       }
 
       override def onCompleted(): Unit = {
@@ -157,7 +163,7 @@ class MasterServiceImpl(expectedWorkers: Int)(implicit ec: ExecutionContext)
         // 준비된 splitters를 응답으로 전송
         val splittersArr = sampling.splitters
         val resp = Splitters(
-          splittersArr.map(com.google.protobuf.ByteString.copyFrom).toIndexedSeq
+          key = splittersArr.map(com.google.protobuf.ByteString.copyFrom).toIndexedSeq
         )
 
         responseObserver.onNext(resp)
