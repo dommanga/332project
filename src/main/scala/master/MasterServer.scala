@@ -113,6 +113,7 @@ class MasterServiceImpl(
 
   private val nextSamplesWorker = new java.util.concurrent.atomic.AtomicInteger(0)
   @volatile private var planBroadcasted = false 
+
   private def expectedWorkers: Int = sampling.expectedWorkers
 
 
@@ -147,7 +148,6 @@ class MasterServiceImpl(
     }
   }
 
-  // Week 4: SendSamples
   override def sendSamples(responseObserver: StreamObserver[Splitters]): StreamObserver[Sample] = {
     val workerId: Int = nextSamplesWorker.getAndIncrement()
 
@@ -183,6 +183,7 @@ class MasterServiceImpl(
 
         println(s"[sendSamples] worker#$workerId completed. " +
           s"splitters_ready=${splittersArr.nonEmpty} count=${splittersArr.length}")
+                
         if (sampling.isReady && !planBroadcasted){
           planBroadcasted = true
           val plan = PartitionPlanner.createPlan(splittersArr, expectedWorkers)
