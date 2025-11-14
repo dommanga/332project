@@ -41,6 +41,12 @@ object WorkerClient extends App {
         val assignment = masterClient.register(workerInfo)
         println(s"   assigned partitions: ${assignment.partitionIds.mkString("[", ", ", "]")}")
 
+        WorkerState.setMasterClient(masterClient)
+        WorkerState.setWorkerId(assignment.workerId)
+
+        val workerServer = new WorkerServer(conf.workerPort, conf.outputDir)
+        workerServer.start()
+
         // 2. 샘플링
         val samples = common.Sampling.uniformEveryN(conf.inputPaths, everyN = 1000)
         println(s"  collected ${samples.size} sample keys (every 1000th record)")

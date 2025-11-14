@@ -3,19 +3,12 @@ package master
 import io.grpc.{Server, ServerBuilder, ManagedChannelBuilder}
 import rpc.sort.{
   MasterServiceGrpc, WorkerInfo, WorkerAssignment, Ack, 
-  Sample, Splitters, PartitionPlan, WorkerServiceGrpc
+  Sample, Splitters, PartitionPlan, WorkerServiceGrpc, WorkerStatus, TaskId
 }
 import master.PartitionPlanner
 import scala.concurrent.{ExecutionContext, Future}
 import scala.collection.mutable
 import io.grpc.stub.StreamObserver
-
-object MockSplitterCalculator extends SplitterCalculator {
-  override def calculate(samples: Array[Array[Byte]], numWorkers: Int): Array[Array[Byte]] = {
-    println(s"🔧 [MOCK] Calculating ${numWorkers-1} splitters from ${samples.length} samples")
-    Array.empty[Array[Byte]]
-  }
-}
 
 object MasterServer {
   def main(args: Array[String]): Unit = {
@@ -53,6 +46,56 @@ object MasterServer {
       .find(addr => !addr.isLoopbackAddress && addr.getAddress.length == 4)
       .map(_.getHostAddress)
       .getOrElse("127.0.0.1")
+  }
+}
+
+object ShuffleTracker {
+  private val completedWorkers = mutable.Set[Int]()
+  private val mergeCompletedWorkers = mutable.Set[Int]()
+  private var totalWorkers = 0
+
+  def init(n: Int): Unit = synchronized {
+    totalWorkers = n
+    completedWorkers.clear()
+    mergeCompletedWorkers.clear()
+    println(s"[ShuffleTracker] Initialized for $n workers")
+  }
+
+  def markShuffleComplete(workerId: Int): Unit = synchronized {
+    completedWorkers += workerId
+    println(s"[ShuffleTracker] Worker $workerId shuffle complete " +
+      s"(${completedWorkers.size}/$totalWorkers)")
+
+    if (isAllShuffleComplete) {
+      println("\n" + "=" * 60)
+      println("All workers completed shuffle phase!")
+      println("=" * 60 + "\n")
+    }
+  }
+
+  def markMergeComplete(workerId: Int): Unit = synchronized {
+    mergeCompletedWorkers += workerId
+    println(s"[ShuffleTracker] Worker $workerId merge complete " +
+      s"(${mergeCompletedWorkers.size}/$totalWorkers)")
+
+    if (isAllMergeComplete) {
+      println("\n" + "=" * 60)
+      println("ALL DONE! Distributed sorting complete!")
+      println("=" * 60)
+      printFinalReport()
+    }
+  }
+
+  def isAllShuffleComplete: Boolean = completedWorkers.size == totalWorkers
+  def isAllMergeComplete: Boolean = mergeCompletedWorkers.size == totalWorkers
+
+  private def printFinalReport(): Unit = {
+    println("\nFinal Report:")
+    println(s"  Total workers: $totalWorkers")
+    println(s"  Shuffle completed: ${completedWorkers.size}")
+    println(s"  Merge completed: ${mergeCompletedWorkers.size}")
+    println("\nCheck output files in each worker's output directory:")
+    println("  partition.0, partition.1, partition.2, ...")
   }
 }
 
@@ -196,13 +239,58 @@ class MasterServiceImpl(
               val stub = WorkerServiceGrpc.blockingStub(ch)
               val ack = stub.setPartitionPlan(plan)
               println(s"  → worker#${w.id} (${w.workerInfo.ip}) ack=${ack.ok}")
+
+              val shuffleAck = stub.startShuffle(TaskId("task-001"))
+              println(s"  → worker#${w.id} shuffle started: ${shuffleAck.msg}")
+
               ch.shutdown()
             } catch {
               case e: Exception => 
                 println(s"  ✗ Failed to send plan to ${w.workerInfo.ip}: ${e.getMessage}")
             }
           }
+
+          ShuffleTracker.init(expectedWorkers)
         }
+      }
+    }
+  }
+
+  override def reportShuffleComplete(status: WorkerStatus): Future[Ack] = {
+    Future {
+      println(s"[Master] Worker ${status.workerId} reported shuffle complete")
+      ShuffleTracker.markShuffleComplete(status.workerId)
+
+      if (ShuffleTracker.isAllShuffleComplete) {
+        triggerFinalizePhase()
+      }
+
+      Ack(ok = true, msg = "Shuffle completion noted")
+    }
+  }
+
+  override def reportMergeComplete(status: WorkerStatus): Future[Ack] = {
+    Future {
+      println(s"[Master] Worker ${status.workerId} reported merge complete")
+      ShuffleTracker.markMergeComplete(status.workerId)
+      Ack(ok = true, msg = "Merge completion noted")
+    }
+  }
+
+  private def triggerFinalizePhase(): Unit = {
+    println("\n[Master] Triggering finalize phase on all workers...")
+
+    registry.getAllWorkers.foreach { w =>
+      val target = s"${w.workerInfo.ip}:${w.workerInfo.port}"
+      try {
+        val ch = io.grpc.ManagedChannelBuilder.forTarget(target).usePlaintext().build()
+        val stub = WorkerServiceGrpc.blockingStub(ch)
+        val ack = stub.finalizePartitions(TaskId("task-001"))
+        println(s"  ✓ Worker ${w.id} finalize started: ${ack.msg}")
+        ch.shutdown()
+      } catch {
+        case e: Exception =>
+          println(s"  ✗ Failed to send finalize to worker ${w.id}: ${e.getMessage}")
       }
     }
   }
