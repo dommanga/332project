@@ -80,6 +80,16 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
     }
   }
 
+  def reportMergeComplete(workerId: Int): Unit = {
+    val status = WorkerStatus(
+      workerId = workerId,
+      phase = "merge_complete",
+      timestamp = System.currentTimeMillis()
+    )
+    val ack = blockingStub.reportMergeComplete(status)
+    println(s"[MasterClient] Merge complete reported: ${ack.msg}")
+  }
+
   /** 연결 종료 */
   def shutdown(): Unit = {
     channel.shutdown()

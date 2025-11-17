@@ -1,7 +1,7 @@
 package worker
 
 import io.grpc.{Server, ServerBuilder}
-import rpc.sort.{WorkerServiceGrpc, PartitionPlan, Ack, PartitionChunk}
+import rpc.sort.{WorkerServiceGrpc, PartitionPlan, Ack, PartitionChunk, TaskId}
 import io.grpc.stub.StreamObserver
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -273,4 +273,32 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   // Byte array → hex 문자열 (기존 함수 유지)
   private def bytesToHex(arr: Array[Byte]): String =
     arr.map("%02X".format(_)).mkString
+
+  override def startShuffle(taskId: TaskId): Future[Ack] = {
+    Future {
+      println(s"[Worker] Received StartShuffle command for task=${taskId.id}")
+
+      // TODO: Sangwon의 shuffle 로직 호출
+      // WorkerClient.startShufflePhase() ??
+
+      Ack(ok = true, msg = "Shuffle started")
+    }
+  }
+
+  override def finalizePartitions(taskId: TaskId): Future[Ack] = {
+    Future {
+      println(s"[Worker] Received FinalizePartitions command for task=${taskId.id}")
+
+      finalizeAll()
+
+      reportMergeCompleteToMaster()
+
+      Ack(ok = true, msg = "Finalize complete")
+    }
+  }
+
+  private def reportMergeCompleteToMaster(): Unit = {
+    WorkerState.reportMergeComplete()
+    println("[Worker] TODO: Report merge complete to Master")
+  }
 }
