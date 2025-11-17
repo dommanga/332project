@@ -74,8 +74,9 @@ service MasterService {
   rpc Heartbeat(WorkerInfo) returns (Ack);
   rpc SendSamples(stream Sample) returns (Splitters);
 
-  // Week 5+: To be implemented
-  // rpc ReportProgress(ProgressUpdate) returns (Ack);
+  // Week 5: Shuffle - coordination
+  rpc ReportShuffleComplete(WorkerStatus) returns (Ack);
+  rpc ReportMergeComplete(WorkerStatus) returns (Ack);
 }
 
 // (Called by the master/workers against a worker)
@@ -85,4 +86,13 @@ service WorkerService {
 
   // Week 5: Shuffle - receive partition data
   rpc PushPartition(stream PartitionChunk) returns (Ack);
+
+  rpc StartShuffle(TaskId) returns (Ack);
+  rpc FinalizePartitions(TaskId) returns (Ack);
+}
+
+message WorkerStatus {
+  int32 worker_id = 1;
+  string phase = 2;  // "shuffle_complete", "merge_complete"
+  int64 timestamp = 3;
 }

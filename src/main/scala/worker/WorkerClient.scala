@@ -53,6 +53,12 @@ object WorkerClient extends App {
         println(s"➡️  assigned workerId = ${assignment.workerId}")
         println(s"➡️  assigned partitions = ${assignment.partitionIds.mkString("[", ", ", "]")}")
 
+        WorkerState.setMasterClient(masterClient)
+        WorkerState.setWorkerId(assignment.workerId)
+
+        val workerServer = new WorkerServer(conf.workerPort, conf.outputDir)
+        workerServer.start()
+
         // ---------------------------------------------------------
         // 2) 샘플링
         // ---------------------------------------------------------
