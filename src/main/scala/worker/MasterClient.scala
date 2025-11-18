@@ -71,13 +71,23 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
 
       // 응답 대기 (최대 30초)
       import scala.concurrent.Await
-      Await.result(promise.future, 30.seconds)
+      Await.result(promise.future, 120.seconds)
 
     } catch {
       case e: Exception =>
         requestObserver.onError(e)
         throw e
     }
+  }
+
+  def reportShuffleComplete(workerId: Int): Unit = {
+    val status = WorkerStatus(
+      workerId = workerId,
+      phase = "shuffle_complete",
+      timestamp = System.currentTimeMillis()
+    )
+    val ack = blockingStub.reportShuffleComplete(status)
+    println(s"[MasterClient] Shuffle complete reported: ${ack.msg}")
   }
 
   def reportMergeComplete(workerId: Int): Unit = {

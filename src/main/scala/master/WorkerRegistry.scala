@@ -30,16 +30,12 @@ class WorkerRegistry {
     println(s"   inputs=${info.inputDirs}")
     println(s"   output=${info.outputDir}")
 
-    // Dummy partitions for Week 4 (3 partitions per worker)
-    val dummyPartitions = (workerId * 3 until (workerId + 1) * 3).toSeq
-    println(s"   partitions=${dummyPartitions.mkString("[", ", ", "]")}")
-
     // Create WorkerAssignment of Proto
     WorkerAssignment(
       success = true,
       message = s"Registered as worker $workerId",
       workerId = workerId,
-      partitionIds = dummyPartitions  // Empty in Week4
+      partitionIds = Seq.empty
     )
   }
 

@@ -163,8 +163,6 @@ class MasterServiceImpl(
   override def registerWorker(request: WorkerInfo): Future[WorkerAssignment] = {
     Future {
       val assignment = registry.register(request)
-      val dummyPartitions = (assignment.workerId * 3 until (assignment.workerId + 1) * 3).toSeq
-      val assignmentWithPartitions = assignment.copy(partitionIds = dummyPartitions)
 
       // 전체 Worker 연결 체크
       if (registry.size == expectedWorkers) {
@@ -178,7 +176,7 @@ class MasterServiceImpl(
         println(s"Waiting for ${sampling.expectedWorkers - registry.size} more workers...")
       }
 
-      assignmentWithPartitions
+      assignment
     }
   }
 

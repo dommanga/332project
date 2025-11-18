@@ -51,7 +51,6 @@ object WorkerClient extends App {
 
         val assignment = masterClient.register(workerInfo)
         println(s"➡️  assigned workerId = ${assignment.workerId}")
-        println(s"➡️  assigned partitions = ${assignment.partitionIds.mkString("[", ", ", "]")}")
 
         WorkerState.setMasterClient(masterClient)
         WorkerState.setWorkerId(assignment.workerId)
@@ -126,6 +125,7 @@ object WorkerClient extends App {
         // ---------------------------------------------------------
         val splitterKeys: Array[Array[Byte]] =
           splitters.key.map(_.toByteArray).toArray
+        val numWorkers = splitterKeys.length + 1
 
         def findPartition(key: Array[Byte]): Int = {
           var idx = 0
@@ -210,13 +210,17 @@ object WorkerClient extends App {
         println("-------------------------------------------------------")
 
         for ((pid, recs) <- partitioned) {
-          val targetWorker = pid % assignment.partitionIds.size
+          val targetWorker = pid % numWorkers
           sendPartition(targetWorker, pid, recs)
         }
 
         println("-------------------------------------------------------")
         println("       🎉 Shuffle Completed")
         println("-------------------------------------------------------")
+
+        masterClient.reportShuffleComplete(assignment.workerId)
+        println("Waiting for finalize command from Master...")
+        WorkerState.awaitFinalizeComplete()
 
       } finally {
         masterClient.shutdown()

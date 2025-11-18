@@ -290,8 +290,8 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
       println(s"[Worker] Received FinalizePartitions command for task=${taskId.id}")
 
       finalizeAll()
-
       reportMergeCompleteToMaster()
+      WorkerState.signalFinalizeComplete()
 
       Ack(ok = true, msg = "Finalize complete")
     }
