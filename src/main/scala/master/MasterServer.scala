@@ -227,8 +227,17 @@ class MasterServiceImpl(
                 
         if (sampling.isReady && !planBroadcasted){
           planBroadcasted = true
-          val plan = PartitionPlanner.createPlan(splittersArr, expectedWorkers)
+          
+          // Worker 주소 목록 생성
+          val workerAddresses: Seq[(Int, String, Int)] = registry.getAllWorkers.map { w =>
+            (w.id, w.workerInfo.ip, w.workerInfo.port)
+          }.toSeq
+          
+          // PartitionPlan에 Worker 주소 포함
+          val plan = PartitionPlanner.createPlan(splittersArr, expectedWorkers, workerAddresses)
+          
           println(s"[Master] Broadcasting PartitionPlan to $expectedWorkers workers...")
+          println(s"[Master] Worker addresses included: ${workerAddresses.map { case (id, ip, port) => s"$id->$ip:$port" }.mkString(", ")}")
 
           registry.getAllWorkers.foreach { w =>
             val target = s"${w.workerInfo.ip}:${w.workerInfo.port}" 

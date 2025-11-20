@@ -116,16 +116,15 @@ object WorkerClient extends App {
         // 5) Local Sort (key 기반)
         // ---------------------------------------------------------
         val sorted = allRecords.sortWith { (a, b) =>
-  		RecordIO.compareKeys(extractKey(a), extractKey(b)) < 0
-	}
-        println("📑 Local sorting completed")
+          RecordIO.compareKeys(extractKey(a), extractKey(b)) < 0
+        }
+        println("🔑 Local sorting completed")
 
         // ---------------------------------------------------------
         // 6) Splitters 기반 Partitioning
         // ---------------------------------------------------------
         val splitterKeys: Array[Array[Byte]] =
           splitters.key.map(_.toByteArray).toArray
-        val numWorkers = splitterKeys.length + 1
 
         def findPartition(key: Array[Byte]): Int = {
           var idx = 0
@@ -142,27 +141,49 @@ object WorkerClient extends App {
         println(s"🧩 Partitioning complete → partitions=${partitioned.size}")
 
         // ---------------------------------------------------------
-        // 7) Shuffle 송신
+        // 7) PartitionPlan에서 Worker 주소 대기 및 수신
         // ---------------------------------------------------------
+        println("⏳ Waiting for PartitionPlan with worker addresses...")
+        
+        // WorkerServer의 PlanStore에서 Plan을 받을 때까지 대기
+        var workerAddresses: Map[Int, (String, Int)] = Map.empty
+        val planDeadline = System.nanoTime() + 60_000_000_000L // 60초 대기
+        
+        while (workerAddresses.isEmpty && System.nanoTime() < planDeadline) {
+          Thread.sleep(100)
+          // WorkerServer에서 저장한 Plan 확인
+          WorkerState.getWorkerAddresses match {
+            case Some(addrs) if addrs.nonEmpty =>
+              workerAddresses = addrs
+              println(s"📋 Received worker addresses: ${addrs.map { case (id, (ip, port)) => s"$id->$ip:$port" }.mkString(", ")}")
+            case _ =>
+              // 아직 Plan 미수신
+          }
+        }
+        
+        if (workerAddresses.isEmpty) {
+          throw new RuntimeException("Timeout waiting for PartitionPlan with worker addresses")
+        }
 
-        /** Worker 포트 규칙:
-          *   worker0 → 6000
-          *   worker1 → 6001
-          *   worker2 → 6002
-          */
-        def targetPort(workerId: Int): Int = 6000 + workerId
+        // ---------------------------------------------------------
+        // 8) Shuffle 송신 - 실제 Worker IP 사용
+        // ---------------------------------------------------------
 
         def sendPartition(
             targetWorkerId: Int,
             partitionId: Int,
             records: Seq[Array[Byte]]
         ): Unit = {
-
-          val port = targetPort(targetWorkerId)
-          println(s"➡️  Sending partition p$partitionId → worker#$targetWorkerId (port=$port)")
+          
+          val (targetIp, targetPort) = workerAddresses.getOrElse(
+            targetWorkerId,
+            throw new RuntimeException(s"Unknown worker $targetWorkerId")
+          )
+          
+          println(s"➡️  Sending partition p$partitionId → worker#$targetWorkerId ($targetIp:$targetPort)")
 
           val channel =
-            ManagedChannelBuilder.forAddress("localhost", port)
+            ManagedChannelBuilder.forAddress(targetIp, targetPort)
               .usePlaintext()
               .build()
 
@@ -210,17 +231,17 @@ object WorkerClient extends App {
         println("-------------------------------------------------------")
 
         for ((pid, recs) <- partitioned) {
-          val targetWorker = pid % numWorkers
+          // 추후 로직 수정 가능
+          val targetWorker = pid % workerAddresses.size
           sendPartition(targetWorker, pid, recs)
         }
 
         println("-------------------------------------------------------")
         println("       🎉 Shuffle Completed")
         println("-------------------------------------------------------")
-
-        masterClient.reportShuffleComplete(assignment.workerId)
-        println("Waiting for finalize command from Master...")
-        WorkerState.awaitFinalizeComplete()
+        
+        // Shuffle 완료 보고
+        WorkerState.reportShuffleComplete()
 
       } finally {
         masterClient.shutdown()
@@ -251,14 +272,20 @@ object WorkerClient extends App {
       return None
     }
 
-    var masterHost = "localhost"
-    var masterPort = 5000
+    val masterAddr = args(0).split(":", 2)
+    if (masterAddr.length != 2) {
+      Console.err.println("Invalid master address format. Use HOST:PORT")
+      return None
+    }
+  
+    val masterHost = masterAddr(0)
+    val masterPort = masterAddr(1).toInt
     val inputs     = collection.mutable.ArrayBuffer.empty[String]
     var outputDir  = "./out"
     var workerId   = "worker-1"
     var workerPort = 6000
 
-    var i = 0
+    var i = 1
     def needValue(opt: String): Boolean = {
       if (i >= args.length) {
         Console.err.println(s"Missing value for $opt")
@@ -268,17 +295,6 @@ object WorkerClient extends App {
 
     while (i < args.length) {
       args(i) match {
-        case "--master" =>
-          i += 1
-          if (!needValue("--master")) return None
-          val hp = args(i).split(":", 2)
-          if (hp.length != 2 || !hp(1).forall(_.isDigit)) {
-            Console.err.println("Invalid --master HOST:PORT")
-            return None
-          }
-          masterHost = hp(0)
-          masterPort = hp(1).toInt
-
         case "-I" | "--input" =>
           i += 1
           if (!needValue("-I")) return None
@@ -288,16 +304,6 @@ object WorkerClient extends App {
           i += 1
           if (!needValue("-O")) return None
           outputDir = args(i)
-
-        case "--id" =>
-          i += 1
-          if (!needValue("--id")) return None
-          workerId = args(i)
-
-        case "--port" =>
-          i += 1
-          if (!needValue("--port")) return None
-          workerPort = args(i).toInt
 
         case other =>
           Console.err.println(s"Unknown option: $other")
@@ -328,20 +334,11 @@ object WorkerClient extends App {
   private def printUsage(): Unit = {
     val msg =
       """Usage:
-        |  sbt "runMain worker.WorkerClient --master HOST:PORT \
-        |                               -I INPUT_PATH [-I INPUT_PATH ...] \
-        |                               -O OUTPUT_DIR \
-        |                               --id WORKER_ID \
-        |                               --port PORT"
+        |  worker <master IP:port> -I <input directory> [<input directory> ...] -O <output directory>
         |
         |Example:
-        |  sbt "runMain worker.WorkerClient --master 127.0.0.1:5000 \
-        |                               -I data/part0 -I data/part1 \
-        |                               -O out \
-        |                               --id worker0 \
-        |                               --port 6000"
+        |  worker 141.223.91.80:30040 -I /data1/input /data2/input -O /home/gla/data
         |""".stripMargin
     Console.err.println(msg)
   }
 }
-

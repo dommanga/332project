@@ -39,9 +39,16 @@ message PartitionRange {
   int32 target_worker = 3;  // Destination worker ID
 }
 
+message WorkerAddress {
+  int32 worker_id = 1;
+  string ip = 2;
+  int32 port = 3;
+}
+
 message PartitionPlan {
   TaskId task = 1;
   repeated PartitionRange ranges = 2;
+  repeated WorkerAddress workers = 3;
 }
 
 // ---------- Shuffle(worker -> worker) ----------
