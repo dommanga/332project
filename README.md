@@ -127,7 +127,7 @@ ls out3/
 
 #### Execution Steps
 
-**Step 1: Deploy Code**
+**Step 1: Deploy Code and generate data**
 
 Deploy project code to all VMs (via git clone or scp):
 
@@ -135,6 +135,16 @@ Deploy project code to all VMs (via git clone or scp):
 # On each VM
 git pull origin main
 sbt compile
+
+# vm01
+cd ~/332project
+./gensort -a -b0 100000 ~/data/input/data
+
+# vm02
+./gensort -a -b100000 100000 ~/data/input/data
+
+# vm03
+./gensort -a -b200000 100000 ~/data/input/data
 ```
 
 **Step 2: Start Master**
@@ -159,13 +169,13 @@ On each Worker VM (via ssh):
 
 ```bash
 # vm01 (2.2.2.101)
-sbt "runMain worker.WorkerClient 2.2.2.254:5000 -I /data/input -O /data/output"
+sbt "runMain worker.WorkerClient 2.2.2.254:5000 -I /home/orange/data/input -O /home/orange/data/output"
 
 # vm02 (2.2.2.102)
-sbt "runMain worker.WorkerClient 2.2.2.254:5000 -I /data/input -O /data/output"
+sbt "runMain worker.WorkerClient 2.2.2.254:5000 -I /home/orange/data/input -O /home/orange/data/output"
 
 # vm03 (2.2.2.103)
-sbt "runMain worker.WorkerClient 2.2.2.254:5000 -I /data/input -O /data/output"
+sbt "runMain worker.WorkerClient 2.2.2.254:5000 -I /home/orange/data/input -O /home/orange/data/output"
 ```
 
 **Step 4: Verify Results**
@@ -173,7 +183,7 @@ sbt "runMain worker.WorkerClient 2.2.2.254:5000 -I /data/input -O /data/output"
 Check output directory on each Worker:
 
 ```bash
-ls /data/output/
+ls ~/data/output/
 # partition.0, partition.1, partition.2, ...
 ```
 
@@ -184,6 +194,130 @@ ls /data/output/
 - [ ] Worker-to-Worker Shuffle uses actual IPs
 - [ ] Partition files created on each Worker
 - [ ] valsort validation passes
+
+---
+
+## Deployment Script
+
+For easier cluster deployment and management, use the deploy.sh script.
+
+### Setup
+
+```bash
+
+chmod +x deploy.sh
+
+```
+
+### Commands
+
+| Command | Description |
+
+|---------|-------------|
+
+| init | Initial setup (git clone, create directories) |
+
+| update | Git pull && sbt compile on all workers |
+
+| gensort | Deploy gensort binary to workers |
+
+| gendata | Generate test data on workers |
+
+| clean | Clean output directories |
+
+| reset | Clean output + generate new data |
+
+| start | Start all workers |
+
+| all | Full deployment (update + reset) |
+
+### Usage Examples
+
+```bash
+
+# First time setup
+
+./deploy.sh init
+
+./deploy.sh gensort
+
+# Development workflow
+
+./deploy.sh update      # After code changes
+
+./deploy.sh reset       # Reset data
+
+./deploy.sh start       # Start workers
+
+# Use specific number of workers
+
+./deploy.sh gendata 5   # Generate data for 5 workers
+
+./deploy.sh start 5     # Start 5 workers
+
+# Full test with 10 workers
+
+./deploy.sh all 10
+
+```
+
+### Typical Workflow
+
+1. **Initial Setup (once)**
+
+   ```bash
+
+   ./deploy.sh init
+
+   ./deploy.sh gensort
+
+   ```
+
+2. **Before Each Test**
+
+   ```bash
+
+   ./deploy.sh update    # If code changed
+
+   ./deploy.sh reset     # Clean + generate data
+
+   ```
+
+3. **Run Test**
+
+   ```bash
+
+   # Terminal 1: Start Master
+
+   sbt "runMain master.MasterServer 3"
+
+   
+
+   # Terminal 2: Start Workers
+
+   ./deploy.sh start 3
+
+   ```
+
+### Configuration
+
+Edit the following variables in deploy.sh as needed:
+
+```bash
+
+PROJECT_DIR="/home/orange/332project"
+
+DATA_INPUT="/home/orange/data/input"
+
+DATA_OUTPUT="/home/orange/data/output"
+
+MASTER_IP="2.2.2.254"
+
+MASTER_PORT="5000"
+
+RECORDS_PER_WORKER=100000
+
+```
 
 ---
 
