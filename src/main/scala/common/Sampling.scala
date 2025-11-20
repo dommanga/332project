@@ -14,9 +14,8 @@ object Sampling {
     val allFiles = paths.flatMap { path =>
       val f = new File(path)
       if (f.isDirectory) {
-        // 디렉토리면 안의 .dat 파일들 찾기
         f.listFiles()
-          .filter(_.getName.endsWith(".dat"))
+          .filter(_.isFile) 
           .map(_.getPath)
           .toSeq
       } else if (f.isFile) {

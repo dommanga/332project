@@ -310,6 +310,9 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
       reportMergeCompleteToMaster()
 
+      // To let worker client shutdown
+      WorkerState.signalFinalizeComplete()
+
       Ack(ok = true, msg = "Finalize complete")
     }
   }

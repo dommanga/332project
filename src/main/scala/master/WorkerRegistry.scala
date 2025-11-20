@@ -19,9 +19,12 @@ class WorkerRegistry {
     val workerId = nextId
     nextId += 1
 
+    val assignedPort = 6000 + workerId
+    val updatedInfo = info.withPort(assignedPort)
+
     workers(workerId) = RegisteredWorker(
       id = workerId,
-      workerInfo = info,
+      workerInfo = updatedInfo,
       lastHeartbeat = Instant.now()
     )
 
@@ -35,7 +38,8 @@ class WorkerRegistry {
       success = true,
       message = s"Registered as worker $workerId",
       workerId = workerId,
-      partitionIds = Seq.empty
+      partitionIds = Seq.empty,
+      assignedPort = assignedPort
     )
   }
 

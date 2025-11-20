@@ -15,7 +15,6 @@ final case class WorkerConfig(
     inputPaths: Seq[String],
     outputDir: String,
     workerId: String,
-    workerPort: Int
 )
 
 /** Worker 실행 메인 */
@@ -31,7 +30,6 @@ object WorkerClient extends App {
       println(s"      inputs   = ${conf.inputPaths.mkString(", ")}")
       println(s"      output   = ${conf.outputDir}")
       println(s"      id       = ${conf.workerId}")
-      println(s"      port     = ${conf.workerPort}")
       println("=============================================")
 
       // Master 클라이언트 생성
@@ -44,19 +42,20 @@ object WorkerClient extends App {
         val workerInfo = WorkerInfo(
           id         = conf.workerId,
           ip         = getLocalIP(),
-          port       = conf.workerPort,
+          port       = 0,
           inputDirs  = conf.inputPaths,
           outputDir  = conf.outputDir
         )
 
         val assignment = masterClient.register(workerInfo)
-        println(s"➡️  assigned workerId = ${assignment.workerId}")
+        println(s"➡️  assigned workerId = ${assignment.workerId}, port = ${assignment.assignedPort}")
 
         WorkerState.setMasterClient(masterClient)
         WorkerState.setWorkerId(assignment.workerId)
 
-        val workerServer = new WorkerServer(conf.workerPort, conf.outputDir)
+        val workerServer = new WorkerServer(assignment.assignedPort, conf.outputDir)
         workerServer.start()
+        println(s"🔌 WorkerServer started on port ${assignment.assignedPort}")
 
         // ---------------------------------------------------------
         // 2) 샘플링
@@ -69,14 +68,6 @@ object WorkerClient extends App {
         // ---------------------------------------------------------
         val splitters = masterClient.sendSamples(samples)
         println(s"➡️  received ${splitters.key.size} splitters from Master")
-
-        // ---------------------------------------------------------
-        // TODO Week 5: 실제 정렬 + 파티셔닝 + Shuffle 송신
-        // ---------------------------------------------------------
-
-        println("-------------------------------------------------------")
-        println("    🚀 [Week5] Local sorting + partitioning + shuffle")
-        println("-------------------------------------------------------")
 
         // ---------------------------------------------------------
         // Helper 1: extract key from 100-byte record
@@ -94,14 +85,23 @@ object WorkerClient extends App {
         // Helper 3: read all 100-byte records from files
         // ---------------------------------------------------------
         def readAll(path: String): Vector[Array[Byte]] = {
-          val buf = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
-          RecordIO.streamRecords(path) { (key, value) =>
-            val rec = new Array[Byte](RecordIO.RecordSize)
-            System.arraycopy(key, 0, rec, 0, RecordIO.KeySize)
-            System.arraycopy(value, 0, rec, RecordIO.KeySize, RecordIO.RecordSize - RecordIO.KeySize)
-            buf += rec
+          val file = new java.io.File(path)
+          val files = if (file.isDirectory) {
+            file.listFiles().filter(_.isFile).toSeq
+          } else {
+            Seq(file)
           }
-          buf.toVector
+          
+          files.flatMap { f =>
+            val buf = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+            RecordIO.streamRecords(f.getPath) { (key, value) =>
+              val rec = new Array[Byte](RecordIO.RecordSize)
+              System.arraycopy(key, 0, rec, 0, RecordIO.KeySize)
+              System.arraycopy(value, 0, rec, RecordIO.KeySize, RecordIO.RecordSize - RecordIO.KeySize)
+              buf += rec
+            }
+            buf
+          }.toVector
         }
 
         // ---------------------------------------------------------
@@ -243,6 +243,10 @@ object WorkerClient extends App {
         // Shuffle 완료 보고
         WorkerState.reportShuffleComplete()
 
+        println("⏳ Waiting for finalize command from Master...")
+        WorkerState.awaitFinalizeComplete()
+        println("✅ Worker completed successfully")
+
       } finally {
         masterClient.shutdown()
       }
@@ -283,7 +287,6 @@ object WorkerClient extends App {
     val inputs     = collection.mutable.ArrayBuffer.empty[String]
     var outputDir  = "./out"
     var workerId   = "worker-1"
-    var workerPort = 6000
 
     var i = 1
     def needValue(opt: String): Boolean = {
@@ -324,8 +327,7 @@ object WorkerClient extends App {
           masterPort = masterPort,
           inputPaths = inputs.toSeq,
           outputDir  = outputDir,
-          workerId   = workerId,
-          workerPort = workerPort
+          workerId   = workerId
         )
       )
     }

@@ -24,6 +24,7 @@ message WorkerAssignment {
   string message = 2;               // Response message
   int32 worker_id = 3;              // Assigned worker ID (0, 1, 2, ...)
   repeated int32 partition_ids = 4; // Partition IDs to handle (for later)
+  int32 assigned_port = 5;
 }
 
 // ---------- Sampling ----------
