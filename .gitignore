@@ -32,4 +32,5 @@ gensort-*/
 # Input/Output directories
 input*/
 output*/
+out*/
 test_*/

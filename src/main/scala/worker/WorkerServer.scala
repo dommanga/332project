@@ -12,6 +12,10 @@ import java.io.FileOutputStream
 import java.nio.ByteBuffer
 
 object WorkerServer {
+  /** 
+   * Standalone entry point for testing WorkerServer independently.
+   * In production, WorkerServer is instantiated by WorkerClient.
+   */
   def main(args: Array[String]): Unit = {
     if (args.length < 1) {
       println("Usage: worker-server <port> [outputDir]")
@@ -94,6 +98,22 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
       println(f"  range#$idx → worker=${r.targetWorker}%d, " +
         s"lo=${bytesToHex(r.lo.toByteArray)} hi=${bytesToHex(r.hi.toByteArray)}")
     }
+    
+    // Worker 주소 정보 저장
+    if (plan.workers.nonEmpty) {
+      val addresses: Map[Int, (String, Int)] = plan.workers.map { w =>
+        w.workerId -> (w.ip, w.port)
+      }.toMap
+      
+      println(s"[Worker] Received ${addresses.size} worker addresses:")
+      addresses.foreach { case (id, (ip, port)) =>
+        println(s"  worker#$id → $ip:$port")
+      }
+      
+      // WorkerState에 저장하여 WorkerClient가 사용할 수 있도록 함
+      WorkerState.setWorkerAddresses(addresses)
+    }
+    
     PlanStore.set(plan)
     Future.successful(Ack(ok = true, msg = "Plan received"))
   }
@@ -164,7 +184,7 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
           s"[Worker] pushPartition completed: partition=$pid chunks=$countChunks lastSeq=$lastSeq records=${run.length}"
         )
 
-        responseObserver.onNext(Ack(ok = true, msg = s"received $countChunks chunks ($run.length records) for $pid"))
+        responseObserver.onNext(Ack(ok = true, msg = s"received $countChunks chunks (${run.length} records) for $pid"))
         responseObserver.onCompleted()
       }
     }
@@ -192,7 +212,7 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     // Scala PriorityQueue 는 max-heap 이라, 최소 key가 먼저 나오게 비교 반전
     implicit val runOrdering: Ordering[RunIter] =
       Ordering.fromLessThan[RunIter] { (x, y) =>
-        compareRecords(x.current, y.current) > 0 // current가 "더 큼"을 true로 → min-heap 효과
+        compareRecords(x.current, y.current) > 0 // current가 "더 큰"을 true로 → min-heap 효과
       }
 
     val pq = mutable.PriorityQueue.empty[RunIter]
@@ -278,9 +298,6 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     Future {
       println(s"[Worker] Received StartShuffle command for task=${taskId.id}")
 
-      // TODO: Sangwon의 shuffle 로직 호출
-      // WorkerClient.startShufflePhase() ??
-
       Ack(ok = true, msg = "Shuffle started")
     }
   }
@@ -293,12 +310,14 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
       reportMergeCompleteToMaster()
 
+      // To let worker client shutdown
+      WorkerState.signalFinalizeComplete()
+
       Ack(ok = true, msg = "Finalize complete")
     }
   }
 
   private def reportMergeCompleteToMaster(): Unit = {
     WorkerState.reportMergeComplete()
-    println("[Worker] TODO: Report merge complete to Master")
   }
 }

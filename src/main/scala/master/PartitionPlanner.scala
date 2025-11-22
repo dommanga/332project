@@ -1,11 +1,24 @@
 package master
 
-import rpc.sort.{PartitionRange, PartitionPlan, TaskId}
+import rpc.sort.{PartitionRange, PartitionPlan, TaskId, WorkerAddress}
 import com.google.protobuf.ByteString
 import common.RecordIO
 
 object PartitionPlanner {
-  def createPlan(splitters: Array[Array[Byte]], numWorkers: Int): PartitionPlan = {
+  /**
+   * Create partition plan with worker addresses for distributed shuffle
+   * 
+   * @param splitters Splitter keys for partitioning
+   * @param numWorkers Number of workers
+   * @param workerAddresses List of (workerId, ip, port) tuples
+   * @return PartitionPlan with ranges and worker addresses
+   */
+  def createPlan(
+    splitters: Array[Array[Byte]], 
+    numWorkers: Int,
+    workerAddresses: Seq[(Int, String, Int)] = Seq.empty
+  ): PartitionPlan = {
+    
     val ranges = (0 until numWorkers).map { i =>
       val lo: Array[Byte] =
         if (i == 0) Array.fill[Byte](RecordIO.KeySize)(0)
@@ -22,9 +35,19 @@ object PartitionPlanner {
       )
     }.toIndexedSeq
 
+    // Convert worker addresses to proto messages
+    val workers = workerAddresses.map { case (id, ip, port) =>
+      WorkerAddress(
+        workerId = id,
+        ip = ip,
+        port = port
+      )
+    }.toIndexedSeq
+
     PartitionPlan(
-      task   = Some(TaskId("task-001")),
-      ranges = ranges
+      task    = Some(TaskId("task-001")),
+      ranges  = ranges,
+      workers = workers
     )
   }
 }
