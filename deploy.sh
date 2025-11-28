@@ -28,10 +28,11 @@ init_workers() {
 
 # 2. 코드 업데이트 (개발 중 자주 사용)
 update_code() {
-  echo "=== Updating code on all workers ==="
+  local BRANCH=${1:-main}  # 기본값 main
+  echo "=== Updating code on all workers (branch: $BRANCH) ==="
   for host in "${WORKERS[@]}"; do
-    echo "→ $host: git pull && sbt compile"
-    ssh $host "cd $PROJECT_DIR && git pull origin main && sbt compile"
+    echo "→ $host: git pull && checkout $BRANCH && sbt compile"
+    ssh $host "cd $PROJECT_DIR && git fetch && git checkout $BRANCH && git pull origin $BRANCH && sbt compile"
   done
   echo "✅ Code update complete"
 }
