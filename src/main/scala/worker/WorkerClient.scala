@@ -257,10 +257,16 @@ object WorkerClient extends App {
         println("     🚚 Starting Shuffle: worker → worker")
         println("-------------------------------------------------------")
 
-        for ((pid, recs) <- partitioned) {
-          // 추후 로직 수정 가능
-          val targetWorker = pid % workerAddresses.size
-          sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
+        try {
+          for ((pid, recs) <- partitioned) {
+            val targetWorker = pid % workerAddresses.size
+            sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
+          }
+        } catch {
+          case e: Exception =>
+            Console.err.println(s"❌ Shuffle failed: ${e.getMessage}")
+            Console.err.println("Note: Sender failure recovery not yet implemented")
+            throw e
         }
 
         println("-------------------------------------------------------")
