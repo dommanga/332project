@@ -72,6 +72,12 @@ message BlockMeta {
   int64  size = 3;
 }
 
+message ShuffleReassignment {
+  int32 original_target = 1;      // 죽은 worker ID
+  int32 new_target = 2;           // 새로 보낼 worker ID
+  repeated int32 partition_ids = 3; // 이 sender가 재전송해야 할 partition ID들
+}
+
 // ---------- Services ----------
 // (Called by workers against the master)
 service MasterService {
@@ -97,6 +103,8 @@ service WorkerService {
 
   rpc StartShuffle(TaskId) returns (Ack);
   rpc FinalizePartitions(TaskId) returns (Ack);
+
+  rpc UpdateShuffleTarget(ShuffleReassignment) returns (Ack);
 }
 
 message WorkerStatus {

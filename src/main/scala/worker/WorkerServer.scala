@@ -1,7 +1,13 @@
 package worker
 
 import io.grpc.{Server, ServerBuilder}
-import rpc.sort.{WorkerServiceGrpc, PartitionPlan, Ack, PartitionChunk, TaskId}
+import rpc.sort.{
+  WorkerServiceGrpc, 
+  PartitionPlan, 
+  Ack, 
+  PartitionChunk, 
+  TaskId, 
+  ShuffleReassignment}
 import io.grpc.stub.StreamObserver
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -293,6 +299,23 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   // Byte array → hex 문자열 (기존 함수 유지)
   private def bytesToHex(arr: Array[Byte]): String =
     arr.map("%02X".format(_)).mkString
+
+  override def updateShuffleTarget(request: ShuffleReassignment): Future[Ack] = {
+    Future {
+      // TODO: 실제로는 여기서 이 워커의 shuffle 송신 대상 맵을 업데이트해야 함.
+      //       (예: WorkerState나 별도 ShuffleState에 반영)
+      val pids = request.partitionIds.mkString(",")
+      println(
+        s"[Worker] UpdateShuffleTarget: original=${request.originalTarget}, " +
+          s"new=${request.newTarget}, partitions=[$pids]"
+      )
+
+      Ack(
+        ok = true,
+        msg = s"Updated shuffle target to ${request.newTarget} for ${request.partitionIds.size} partitions"
+      )
+    }
+  }
 
   override def startShuffle(taskId: TaskId): Future[Ack] = {
     Future {
