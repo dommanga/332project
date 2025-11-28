@@ -29,10 +29,10 @@ init_workers() {
 
 # 2. 코드 업데이트 (개발 중 자주 사용)
 update_code() {
-  local BRANCH=${1:-main}  # 기본값 main
+  local BRANCH=${1:-main}  # 첫 번째 파라미터를 branch로, 기본값 main
   echo "=== Updating code on all workers (branch: $BRANCH) ==="
   for host in "${WORKERS[@]}"; do
-    echo "→ $host: git pull && checkout $BRANCH && sbt compile"
+    echo "→ $host: updating to $BRANCH"
     ssh $host "cd $PROJECT_DIR && git fetch && git checkout $BRANCH && git pull origin $BRANCH && sbt compile"
   done
   echo "✅ Code update complete"
@@ -133,7 +133,8 @@ case "$1" in
     init_workers
     ;;
   update)
-    update_code
+    shift  # 첫 번째 인자 제거
+    update_code "$1"  # branch 전달
     ;;
   gensort)
     deploy_gensort
