@@ -1,5 +1,6 @@
 package worker
 
+import scala.collection.mutable
 import java.util.concurrent.CountDownLatch
 
 object WorkerState {
@@ -8,6 +9,16 @@ object WorkerState {
   @volatile private var _workerAddresses: Option[Map[Int, (String, Int)]] = None
 
   private val finalizeLatch = new CountDownLatch(1)
+  private val reassignedTargets = mutable.Map[Int, Int]()
+
+  def updateTarget(partitionId: Int, newTarget: Int): Unit = synchronized {
+    reassignedTargets(partitionId) = newTarget
+    println(s"[WorkerState] p$partitionId → worker#$newTarget")
+  }
+  
+  def getTarget(partitionId: Int, originalTarget: Int): Int = synchronized {
+    reassignedTargets.getOrElse(partitionId, originalTarget)
+  }
 
   def setMasterClient(client: MasterClient): Unit = {
     _masterClient = Some(client)

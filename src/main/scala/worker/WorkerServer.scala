@@ -1,7 +1,7 @@
 package worker
 
 import io.grpc.{Server, ServerBuilder}
-import rpc.sort.{WorkerServiceGrpc, PartitionPlan, Ack, PartitionChunk, TaskId}
+import rpc.sort.{WorkerServiceGrpc, PartitionPlan, Ack, PartitionChunk, TaskId, WorkerFailureNotification, ShuffleReassignment}
 import io.grpc.stub.StreamObserver
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -371,5 +371,36 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
   private def reportMergeCompleteToMaster(): Unit = {
     WorkerState.reportMergeComplete()
+  }
+
+  override def updateShuffleTarget(reassignment: ShuffleReassignment): Future[Ack] = {
+    Future {
+      println(s"[Worker] Target update: ${reassignment.originalTarget} → ${reassignment.newTarget}")
+      reassignment.partitionIds.foreach { pid =>
+        WorkerState.updateTarget(pid, reassignment.newTarget)
+      }
+      Ack(ok = true, msg = "Target updated")
+    }
+  }
+
+  override def notifyWorkerFailure(notification: WorkerFailureNotification): Future[Ack] = {
+    Future {
+      val failedId = notification.failedWorkerId
+      val newPartitions = notification.reassignments.map(_.partitionId).toSet
+      
+      println(s"[Worker] Worker $failedId failed. Taking over: $newPartitions")
+      
+      val existing = PartitionStore.allPartitionIds
+        .filter(_.startsWith("p"))
+        .map(_.drop(1).toInt)
+        .toSet
+      
+      val missing = newPartitions -- existing
+      if (missing.nonEmpty) {
+        println(s"[Worker] Will recover: $missing")
+      }
+      
+      Ack(ok = true, msg = "Takeover acknowledged")
+    }
   }
 }
