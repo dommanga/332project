@@ -9,7 +9,8 @@ MASTER_PORT="5000"
 RECORDS_PER_WORKER=100000
 
 # Worker 목록 (필요에 따라 수정)
-WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
+WORKERS=("vm01" "vm02" "vm03")
+# WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
 
 # ============================================
 # 함수 정의
