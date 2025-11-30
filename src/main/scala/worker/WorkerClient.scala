@@ -57,6 +57,37 @@ object WorkerClient extends App {
         workerServer.start()
         println(s"🔌 WorkerServer started on port ${assignment.assignedPort}")
 
+
+// ---------------------------------------------------------
+// ❤️ Heartbeat Thread (Week7: Failure Detection)
+// ---------------------------------------------------------
+val heartbeatThread = new Thread {
+  override def run(): Unit = {
+    while (true) {
+      try {
+        val info = WorkerInfo(
+          id        = conf.workerId,
+          ip        = getLocalIP(),
+          port      = assignment.assignedPort,
+          inputDirs = conf.inputPaths,
+          outputDir = conf.outputDir
+        )
+        masterClient.sendHeartbeat(info) 
+        println(s"💓 Heartbeat sent from worker ${conf.workerId}")
+      } catch {
+        case e: Exception =>
+          println(s"⚠️ Heartbeat error: ${e.getMessage}")
+      }
+
+      Thread.sleep(5000) // 5초마다 보냄
+    }
+  }
+}
+heartbeatThread.setDaemon(true)
+heartbeatThread.start()
+
+
+
         // ---------------------------------------------------------
         // 2) 샘플링
         // ---------------------------------------------------------

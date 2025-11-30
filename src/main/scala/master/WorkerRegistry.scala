@@ -4,17 +4,26 @@ import rpc.sort._
 import java.time.Instant
 import scala.collection.mutable
 
+/** Worker state (Week7) */
+object WorkerPhase extends Enumeration {
+  type WorkerPhase = Value
+  val ALIVE, DEAD = Value
+}
+import WorkerPhase._
+
 case class RegisteredWorker(
-                             id: Int,
-                             workerInfo: WorkerInfo,
-                             lastHeartbeat: Instant
-                           )
+  id: Int,
+  workerInfo: WorkerInfo,
+  lastHeartbeat: Instant,
+  phase: WorkerPhase = WorkerPhase.ALIVE
+)
 
 class WorkerRegistry {
+
   private val workers = mutable.Map.empty[Int, RegisteredWorker]
   private var nextId = 0
 
-  /** Worker registration - Return WorkerAssignment */
+  /** Register worker */
   def register(info: WorkerInfo): WorkerAssignment = synchronized {
     val workerId = nextId
     nextId += 1
@@ -25,15 +34,10 @@ class WorkerRegistry {
     workers(workerId) = RegisteredWorker(
       id = workerId,
       workerInfo = updatedInfo,
-      lastHeartbeat = Instant.now()
+      lastHeartbeat = Instant.now(),
+      phase = ALIVE
     )
 
-    println(s"Worker registered:")
-    println(s"   id=$workerId, ip=${info.ip}:${info.port}")
-    println(s"   inputs=${info.inputDirs}")
-    println(s"   output=${info.outputDir}")
-
-    // Create WorkerAssignment of Proto
     WorkerAssignment(
       success = true,
       message = s"Registered as worker $workerId",
@@ -43,45 +47,55 @@ class WorkerRegistry {
     )
   }
 
-  /** Update Heartbeat - Find with WorkerInfo.id */
+  /** Update heartbeat */
   def updateHeartbeat(info: WorkerInfo): Ack = synchronized {
     workers.find(_._2.workerInfo.id == info.id) match {
-      case Some((workerId, registered)) =>
-        workers(workerId) = registered.copy(lastHeartbeat = Instant.now())
-        Ack(
-          ok = true,
-          msg = s"Heartbeat updated for worker ${info.id}"
-        )
+      case Some((id, w)) =>
+        workers(id) = w.copy(lastHeartbeat = Instant.now(), phase = ALIVE)
+        Ack(ok = true, msg = s"Heartbeat updated for worker ${info.id}")
 
       case None =>
-        Console.err.println(s"Unknown worker heartbeat: ${info.id}")
-        Ack(
-          ok = false,
-          msg = s"Unknown worker: ${info.id}"
-        )
+        Ack(ok = false, msg = s"Unknown worker: ${info.id}")
     }
   }
 
-  /** Get info of all workers */
+  /** All workers */
   def getAllWorkers: Seq[RegisteredWorker] = synchronized {
     workers.values.toSeq
   }
 
-  /** num of Worker */
-  def size: Int = synchronized {
-    workers.size
+  /** Only alive workers */
+  def getAliveWorkers: Seq[RegisteredWorker] = synchronized {
+    workers.values.filter(_.phase == ALIVE).toSeq
   }
 
-  /** Remove dead Worker (timeout: 30s) */
-  def pruneDeadWorkers(timeoutSeconds: Int = 30): Unit = synchronized {
+  /** Mark dead */
+  def markDead(workerId: Int): Unit = synchronized {
+    workers.get(workerId).foreach { w =>
+      workers(workerId) = w.copy(phase = DEAD)
+    }
+  }
+
+  /**
+   * Check dead workers and run callback
+   * callback(deadWorkerId) is executed for each dead worker
+   */
+  def pruneDeadWorkers(
+      timeoutSeconds: Int = 10
+    )(onDead: Int => Unit = _ => ()): Unit = synchronized {
+
     val now = Instant.now()
-    val dead = workers.filter { case (id, reg) =>
-      java.time.Duration.between(reg.lastHeartbeat, now).getSeconds > timeoutSeconds
-    }
 
-    dead.foreach { case (id, reg) =>
-      workers.remove(id)
-      Console.err.println(s"Worker timeout: id=$id, ${reg.workerInfo.id}")
+    workers.foreach { case (id, w) =>
+      val diff = java.time.Duration.between(w.lastHeartbeat, now).getSeconds
+
+      if (diff > timeoutSeconds && w.phase != DEAD) {
+        Console.err.println(s"[Registry] Worker $id DEAD (no heartbeat for $diff s)")
+        markDead(id)
+        onDead(id)
+      }
     }
   }
+
+  def size: Int = synchronized { workers.size }
 }
