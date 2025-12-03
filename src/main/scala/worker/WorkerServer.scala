@@ -16,6 +16,9 @@ import common.RecordIO
 import java.nio.file.{Files, Paths, Path}
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.Paths
 
 object WorkerServer {
   /** 
@@ -59,6 +62,14 @@ class WorkerServer(port: Int, outputDir: String) {
 class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   extends WorkerServiceGrpc.WorkerService {
 
+  private val checkpointDir = {
+    val dir = new java.io.File(s"$outputDir/shuffle-checkpoint")
+    dir.mkdirs()
+    dir
+  }
+  
+  println(s"[Worker] Checkpoint dir: ${checkpointDir.getAbsolutePath}")
+
   // -----------------------------
   //  PartitionPlan 저장 (그대로 유지)
   // -----------------------------
@@ -74,24 +85,65 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   //   - run 하나 = Array[Array[Byte]] (각 원소가 100바이트 레코드)
   // -----------------------------
   object PartitionStore {
-    // partitionId -> runs (각 run은 정렬된 record 배열)
-    private val runsByPid =
-      mutable.Map.empty[String, mutable.ArrayBuffer[Array[Array[Byte]]]]
-
-    def addRun(partitionId: String, run: Array[Array[Byte]]): Unit = this.synchronized {
-      val buf = runsByPid.getOrElseUpdate(partitionId, mutable.ArrayBuffer.empty)
-      buf += run
-      println(s"[Worker] Stored run for partition=$partitionId (records=${run.length}, totalRuns=${buf.size})")
+    // 메타데이터만 메모리에 (파일 경로만 저장)
+    private val runFiles = mutable.Map.empty[String, mutable.ArrayBuffer[String]]
+    
+    /** Run을 디스크에 저장하고 path만 메모리에 유지 */
+    def addRun(
+      partitionId: String, 
+      run: Array[Array[Byte]], 
+      checkpointDir: java.io.File
+    ): Unit = this.synchronized {
+      val runIdx = runFiles.getOrElseUpdate(partitionId, mutable.ArrayBuffer.empty).size
+      val fileName = s"${partitionId}_r${runIdx}.dat"
+      val file = new java.io.File(checkpointDir, fileName)
+      
+      // 디스크에 기록
+      val fos = new FileOutputStream(file)
+      try {
+        run.foreach { record =>
+          fos.write(record)
+        }
+        println(s"[Checkpoint] ${fileName}: ${run.length} records")
+      } finally {
+        fos.close()
+      }
+      
+      // Path만 메모리에
+      val paths = runFiles.getOrElseUpdate(partitionId, mutable.ArrayBuffer.empty)
+      paths += file.getAbsolutePath
     }
-
-    /** 해당 partition의 run들을 꺼내면서 map에서 제거 */
+    
+    /** Partition의 모든 run 파일들을 로드 */
+    def loadRuns(partitionId: String): List[Array[Array[Byte]]] = this.synchronized {
+      runFiles.get(partitionId) match {
+        case Some(runPaths) =>
+          runPaths.map { path =>
+            val file = new java.io.File(path)
+            val bytes = Files.readAllBytes(file.toPath)
+            
+            // 100바이트씩 잘라서 Array로
+            val recordSize = RecordIO.RecordSize
+            val numRecords = bytes.length / recordSize
+            (0 until numRecords).map { i =>
+              java.util.Arrays.copyOfRange(bytes, i * recordSize, (i + 1) * recordSize)
+            }.toArray
+          }.toList
+          
+        case None => Nil
+      }
+    }
+    
+    /** 해당 partition의 runs를 꺼내면서 메모리에서 제거 */
     def drainRuns(partitionId: String): List[Array[Array[Byte]]] = this.synchronized {
-      runsByPid.remove(partitionId).map(_.toList).getOrElse(Nil)
+      val runs = loadRuns(partitionId)
+      runFiles.remove(partitionId)
+      runs
     }
-
+    
     /** 현재까지 들어온 partition_id 전체 리스트 */
     def allPartitionIds: List[String] = this.synchronized {
-      runsByPid.keys.toList
+      runFiles.keys.toList
     }
   }
 
@@ -183,7 +235,7 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
         val run: Array[Array[Byte]] = recordBuffer.toArray
         if (pid.nonEmpty && run.nonEmpty) {
-          PartitionStore.addRun(pid, run)
+          PartitionStore.addRun(pid, run, checkpointDir)
         }
 
         println(
@@ -342,5 +394,36 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
   private def reportMergeCompleteToMaster(): Unit = {
     WorkerState.reportMergeComplete()
+  }
+
+  override def updateShuffleTarget(reassignment: ShuffleReassignment): Future[Ack] = {
+    Future {
+      println(s"[Worker] Target update: ${reassignment.originalTarget} → ${reassignment.newTarget}")
+      reassignment.partitionIds.foreach { pid =>
+        WorkerState.updateTarget(pid, reassignment.newTarget)
+      }
+      Ack(ok = true, msg = "Target updated")
+    }
+  }
+
+  override def notifyWorkerFailure(notification: WorkerFailureNotification): Future[Ack] = {
+    Future {
+      val failedId = notification.failedWorkerId
+      val newPartitions = notification.reassignments.map(_.partitionId).toSet
+      
+      println(s"[Worker] Worker $failedId failed. Taking over: $newPartitions")
+      
+      val existing = PartitionStore.allPartitionIds
+        .filter(_.startsWith("p"))
+        .map(_.drop(1).toInt)
+        .toSet
+      
+      val missing = newPartitions -- existing
+      if (missing.nonEmpty) {
+        println(s"[Worker] Will recover: $missing")
+      }
+      
+      Ack(ok = true, msg = "Takeover acknowledged")
+    }
   }
 }

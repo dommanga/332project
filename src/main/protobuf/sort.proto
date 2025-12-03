@@ -72,10 +72,21 @@ message BlockMeta {
   int64  size = 3;
 }
 
+// ---------- Worker Failure ----------
+message WorkerFailureNotification {
+  int32 failed_worker_id = 1;
+  repeated PartitionReassignment reassignments = 2;
+}
+
+message PartitionReassignment {
+  int32 partition_id = 1;
+  int32 new_owner_id = 2;
+}
+
 message ShuffleReassignment {
-  int32 original_target = 1;      // 죽은 worker ID
-  int32 new_target = 2;           // 새로 보낼 worker ID
-  repeated int32 partition_ids = 3; // 이 sender가 재전송해야 할 partition ID들
+  int32 original_target = 1;
+  int32 new_target = 2;
+  repeated int32 partition_ids = 3;
 }
 
 // ---------- Services ----------
