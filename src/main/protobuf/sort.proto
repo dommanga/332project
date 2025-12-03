@@ -115,7 +115,6 @@ service WorkerService {
   rpc StartShuffle(TaskId) returns (Ack);
   rpc FinalizePartitions(TaskId) returns (Ack);
 
-  rpc NotifyWorkerFailure(WorkerFailureNotification) returns (Ack);
   rpc UpdateShuffleTarget(ShuffleReassignment) returns (Ack);
 }
 
