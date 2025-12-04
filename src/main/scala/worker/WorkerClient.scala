@@ -52,6 +52,7 @@ object WorkerClient extends App {
 
         WorkerState.setMasterClient(masterClient)
         WorkerState.setWorkerId(assignment.workerId)
+        WorkerState.setInputPaths(conf.inputPaths)
 
         val workerServer = new WorkerServer(assignment.assignedPort, conf.outputDir)
         workerServer.start()
@@ -199,81 +200,123 @@ heartbeatThread.start()
         // ---------------------------------------------------------
         // 8) Shuffle 송신 - 실제 Worker IP 사용
         // ---------------------------------------------------------
-
-        def sendPartition(
-            targetWorkerId: Int,
+          def sendPartitionWithRetry(
+            originalTarget: Int,
             partitionId: Int,
-            records: Seq[Array[Byte]]
-        ): Unit = {
-          
-          val (targetIp, targetPort) = workerAddresses.getOrElse(
-            targetWorkerId,
-            throw new RuntimeException(s"Unknown worker $targetWorkerId")
-          )
-          
-          println(s"➡️  Sending partition p$partitionId → worker#$targetWorkerId ($targetIp:$targetPort)")
-
-          val channel =
-            ManagedChannelBuilder.forAddress(targetIp, targetPort)
-              .usePlaintext()
-              .build()
-
-          val stub = WorkerServiceGrpc.stub(channel)
-
-          val ackPromise = scala.concurrent.Promise[Unit]()
-
-          val responseObserver = new StreamObserver[Ack] {
-            override def onNext(v: Ack): Unit =
-              println(s"   ✔ ACK from worker#$targetWorkerId: ${v.msg}")
-
-            override def onError(t: Throwable): Unit = {
-              println(s"   ❌ Error sending partition to worker#$targetWorkerId : ${t.getMessage}")
-              ackPromise.failure(t)
-            }
-
-            override def onCompleted(): Unit = {
-              println(s"   ✔ Completed sending partition p$partitionId")
-              ackPromise.success(())
+            records: Seq[Array[Byte]],
+            workerAddresses: Map[Int, (String, Int)],
+            maxRetries: Int = 3
+          ): Unit = {
+            
+            var attempt = 0
+            
+            while (attempt < maxRetries) {              
+              try {
+                val (targetIp, targetPort) = workerAddresses(originalTarget)
+                println(s"  Attempt ${attempt+1}/$maxRetries: p$partitionId → worker#$originalTarget ($targetIp:$targetPort)")
+                
+                val channel = ManagedChannelBuilder
+                  .forAddress(targetIp, targetPort)
+                  .usePlaintext()
+                  .build()
+                
+                val stub = WorkerServiceGrpc.stub(channel)
+                val ackPromise = scala.concurrent.Promise[Unit]()
+                
+                val responseObserver = new StreamObserver[Ack] {
+                  override def onNext(v: Ack): Unit =
+                    println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
+                  
+                  override def onError(t: Throwable): Unit = {
+                    println(s"    ✗ Error: ${t.getMessage}")
+                    ackPromise.failure(t)
+                  }
+                  
+                  override def onCompleted(): Unit = {
+                    println(s"    ✓ Completed p$partitionId")
+                    ackPromise.success(())
+                  }
+                }
+                
+                val requestObserver = stub.pushPartition(responseObserver)
+                
+                var seq: Long = 0
+                records.foreach { rec =>
+                  val chunk = PartitionChunk(
+                    task = Some(TaskId("task-001")),
+                    partitionId = s"p$partitionId",
+                    senderId = WorkerState.getWorkerId,
+                    payload = ByteString.copyFrom(rec),
+                    seq = seq
+                  )
+                  seq += 1
+                  requestObserver.onNext(chunk)
+                }
+                
+                requestObserver.onCompleted()
+                Await.result(ackPromise.future, 30.seconds)
+                channel.shutdown()
+                
+                println(s"  ✅ p$partitionId sent successfully")
+                return  // 성공! 함수 종료
+                
+              } catch {
+                case e: Exception =>
+                  attempt += 1
+                  
+                  if (attempt < maxRetries) {
+                    val backoff = 2000 * attempt  // 2s, 4s, 6s
+                    println(s"  ⚠️ Send failed, retry after ${backoff}ms: ${e.getMessage}")
+                    Thread.sleep(backoff)
+                  } else {
+                    Console.err.println(s"  ❌ Failed to send p$partitionId after $maxRetries attempts")
+                    throw new RuntimeException(s"Failed after $maxRetries attempts", e)
+                  }
+              }
             }
           }
-
-          val requestObserver =
-            stub.pushPartition(responseObserver)
-
-          var seq: Long = 0
-          records.foreach { rec =>
-            val chunk = PartitionChunk(
-              task        = Some(TaskId("task-001")),
-              partitionId = s"p$partitionId",
-              payload     = ByteString.copyFrom(rec),
-              seq         = seq
-            )
-            seq += 1
-            requestObserver.onNext(chunk)
-          }
-
-          requestObserver.onCompleted()
-          Await.result(ackPromise.future, Duration.Inf)
-          channel.shutdown()
-        }
 
         println("-------------------------------------------------------")
         println("     🚚 Starting Shuffle: worker → worker")
         println("-------------------------------------------------------")
 
-        for ((pid, recs) <- partitioned) {
-          // 추후 로직 수정 가능
-          val targetWorker = pid % workerAddresses.size
-          sendPartition(targetWorker, pid, recs)
+        try {
+          for ((pid, recs) <- partitioned) {
+            val targetWorker = pid % workerAddresses.size
+            checkpointSentPartition(pid, recs, conf.outputDir)
+            sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
+          }
+        } catch {
+          case e: Exception =>
+            Console.err.println(s"❌ Shuffle failed: ${e.getMessage}")
+            Console.err.println("Note: Sender failure recovery not yet implemented")
+            throw e
         }
 
         println("-------------------------------------------------------")
         println("       🎉 Shuffle Completed")
         println("-------------------------------------------------------")
         
-        // Shuffle 완료 보고
+        println("Shuffle completed, reporting to Master...")
+
+        val sendRecords = partitioned.map { case (pid, _) =>
+          val target = pid % workerAddresses.size
+          PartitionSendRecord(
+            partitionId = pid,
+            targetWorkerId = target,
+            senderId = WorkerState.getWorkerId,
+            success = true
+          )
+        }.toSeq
+
+        val report = ShuffleCompletionReport(
+          workerId = WorkerState.getWorkerId,
+          sendRecords = sendRecords
+        )
+        WorkerState.setShuffleReport(report)
         WorkerState.reportShuffleComplete()
 
+        println("Shuffle report sent to Master")
         println("⏳ Waiting for finalize command from Master...")
         WorkerState.awaitFinalizeComplete()
         println("✅ Worker completed successfully")
@@ -296,6 +339,32 @@ heartbeatThread.start()
       .find(addr => !addr.isLoopbackAddress && addr.getAddress.length == 4)
       .map(_.getHostAddress)
       .getOrElse("127.0.0.1")
+  }
+
+  /**
+   * Sender checkpoint 저장 (Atomic write)
+   */
+  private def checkpointSentPartition(
+    partitionId: Int, 
+    records: Seq[Array[Byte]], 
+    outputDir: String
+  ): Unit = {
+    val checkpointDir = new java.io.File(s"$outputDir/sent-checkpoint")
+    checkpointDir.mkdirs()
+    
+    val tempFile = new java.io.File(checkpointDir, s"sent_p${partitionId}.dat.tmp")
+    val fos = new java.io.FileOutputStream(tempFile)
+    try {
+      records.foreach { rec => fos.write(rec) }
+    } finally {
+      fos.close()
+    }
+    
+    val finalFile = new java.io.File(checkpointDir, s"sent_p${partitionId}.dat")
+    if (finalFile.exists()) finalFile.delete()
+    tempFile.renameTo(finalFile)
+    
+    println(s"  💾 Checkpointed sent_p${partitionId}: ${records.size} records")
   }
 
   // ---------------------------------------------------------

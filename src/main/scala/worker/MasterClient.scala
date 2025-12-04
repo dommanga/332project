@@ -80,14 +80,9 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
     }
   }
 
-  def reportShuffleComplete(workerId: Int): Unit = {
-    val status = WorkerStatus(
-      workerId = workerId,
-      phase = "shuffle_complete",
-      timestamp = System.currentTimeMillis()
-    )
-    val ack = blockingStub.reportShuffleComplete(status)
-    println(s"[MasterClient] Shuffle complete reported: ${ack.msg}")
+  def reportShuffleComplete(report: ShuffleCompletionReport): Unit = {
+    val ack = blockingStub.reportShuffleComplete(report)
+    println(s"[MasterClient] Shuffle report sent: ${ack.msg}")
   }
 
   def reportMergeComplete(workerId: Int): Unit = {
@@ -98,6 +93,12 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
     )
     val ack = blockingStub.reportMergeComplete(status)
     println(s"[MasterClient] Merge complete reported: ${ack.msg}")
+  }
+
+  def queryPartitionSenders(partitionId: Int): Seq[Int] = {
+    val query = PartitionSendersQuery(partitionId = partitionId)
+    val response = blockingStub.queryPartitionSenders(query)
+    response.senderIds
   }
 
   /** 연결 종료 */
