@@ -128,9 +128,9 @@ class MasterServer(port: Int, expectedWorkers: Int) {
     val pruneThread = new Thread {
       override def run(): Unit = {
         while (!Thread.interrupted()) {
-          Thread.sleep(30000)
+          Thread.sleep(5000)
 
-          registry.pruneDeadWorkers() { deadId =>
+          registry.pruneDeadWorkers(timeoutSeconds = 10) { deadId =>
             println(s"[Master] DEAD worker detected → $deadId")
           }
         }
