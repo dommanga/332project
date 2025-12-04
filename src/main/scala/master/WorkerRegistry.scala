@@ -39,7 +39,7 @@ class WorkerRegistry {
         id
     }
 
-    val assignedPort = 7000 + workerId
+    val assignedPort = 8000 + workerId
     val updatedInfo = info.withPort(assignedPort)
 
     workers(workerId) = RegisteredWorker(
