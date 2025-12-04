@@ -169,13 +169,13 @@ On each Worker VM (via ssh):
 
 ```bash
 # vm01 (2.2.2.101)
-sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/output"
+sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/out"
 
 # vm02 (2.2.2.102)
-sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/output"
+sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/out"
 
 # vm03 (2.2.2.103)
-sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/output"
+sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/out"
 ```
 
 **Step 4: Verify Results**
@@ -183,7 +183,7 @@ sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orang
 Check output directory on each Worker:
 
 ```bash
-ls ~/data/output/
+ls ~/data/out/
 # partition.0, partition.1, partition.2, ...
 ```
 

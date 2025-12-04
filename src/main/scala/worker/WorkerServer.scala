@@ -347,9 +347,10 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     
     val myId = WorkerState.getWorkerId
     val totalWorkers = plan.get.workers.size
+    val numPartitions = plan.get.ranges.size
     
     // 내가 받아야 하는 partitions
-    val expectedPartitions = (0 until 100).filter(_ % totalWorkers == myId)
+    val expectedPartitions = (0 until numPartitions).filter(_ % totalWorkers == myId)
     
     println(s"[Worker] Checking ${expectedPartitions.size} partitions for missing senders...")
     

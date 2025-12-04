@@ -44,9 +44,12 @@ final class QuantileSplitterCalculator extends SplitterCalculator {
     if (samples.isEmpty) return Array.empty
 
     val sorted = samples.sortWith((a, b) => compareKeys(a, b) < 0)
-    val k = numWorkers
-    (1 until k).map { i =>
-      val idx = math.min((i.toLong * sorted.length / k).toInt, sorted.length - 1)
+    
+    val numPartitions = numWorkers * 4
+    val numSplitters = numPartitions - 1
+    
+    (1 to numSplitters).map { i =>
+      val idx = math.min((i.toLong * sorted.length / numPartitions).toInt, sorted.length - 1)
       sorted(idx)
     }.toArray
   }
