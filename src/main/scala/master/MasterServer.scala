@@ -19,7 +19,7 @@ object MasterServer {
     }
 
     val numWorkers = args(0).toInt
-    val port = 5000
+    val port = 5100
 
     val server = new MasterServer(port, numWorkers)
     server.start()

@@ -2,19 +2,27 @@
 # 설정
 # ============================================
 PROJECT_DIR="/home/orange/332project"
-DATA_INPUT="/home/orange/data/input"
-DATA_OUTPUT="/home/orange/data/output"
+
+DATASET="small"
+DATA_INPUT="/dataset/${DATASET}"
+DATA_OUTPUT="/home/orange/out"
 MASTER_IP="2.2.2.254"
-MASTER_PORT="5000"
+MASTER_PORT="5100"
 RECORDS_PER_WORKER=100000
 
-# Worker 목록 (필요에 따라 수정)
-WORKERS=("vm01" "vm02" "vm03")
-# WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
+DEFAULT_NUM_WORKERS=3
+
+ALL_WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
 
 # ============================================
 # 함수 정의
 # ============================================
+
+get_workers() {
+  local num=$1
+  WORKERS=("${ALL_WORKERS[@]:0:$num}")
+  echo "Using $num workers: ${WORKERS[*]}"
+}
 
 # 1. 초기 설정 (최초 1회)
 init_workers() {
@@ -115,14 +123,8 @@ usage() {
 # ============================================
 # Worker 개수 조정
 # ============================================
-if [ -n "$2" ]; then
-  NUM_WORKERS=$2
-  WORKERS=()
-  for ((i=1; i<=NUM_WORKERS; i++)); do
-    WORKERS+=("vm$(printf '%02d' $i)")
-  done
-  echo "Using ${#WORKERS[@]} workers: ${WORKERS[*]}"
-fi
+NUM_WORKERS=${2:-$DEFAULT_NUM_WORKERS}
+get_workers $NUM_WORKERS
 
 # ============================================
 # 명령어 실행
