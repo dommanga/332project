@@ -119,11 +119,23 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
         .toSet
     }
 
-    def loadAllRunsForPartition(partitionId: String): List[Array[Array[Byte]]] = this.synchronized {
-      runData.keys
-        .filter(_.startsWith(s"${partitionId}_"))
-        .flatMap(runId => runData(runId))
+    def loadAllRunsForPartition(partitionId: String): List[Array[Array[Byte]]] = synchronized {
+      println(s"[PartitionStore] Loading runs for $partitionId")
+      println(s"[PartitionStore] Available keys: ${runData.keys.mkString(", ")}")
+      
+      val runs = runData.keys
+        .filter(key => {
+          val extracted = key.split("_from_").headOption.getOrElse("")
+          extracted == partitionId
+        })
+        .flatMap(runId => {
+          println(s"[PartitionStore]   Loading $runId: ${runData(runId).size} runs")
+          runData(runId)
+        })
         .toList
+      
+      println(s"[PartitionStore] Total runs for $partitionId: ${runs.size}")
+      runs
     }
   }
 

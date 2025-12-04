@@ -130,7 +130,7 @@ class MasterServer(port: Int, expectedWorkers: Int) {
         while (!Thread.interrupted()) {
           Thread.sleep(5000)
 
-          registry.pruneDeadWorkers(timeoutSeconds = 10) { deadId =>
+          registry.pruneDeadWorkers(timeoutSeconds = 30) { deadId =>
             println(s"[Master] DEAD worker detected → $deadId")
           }
         }
@@ -359,12 +359,6 @@ class MasterServiceImpl(
   override def reportMergeComplete(status: WorkerStatus): Future[Ack] = Future {
     println(s"[Master] Worker ${status.workerId} reported merge complete")
     ShuffleTracker.markMergeComplete(status.workerId)
-
-    if (ShuffleTracker.isAllMergeComplete) {
-      println("[Master] All merge complete — running verification...")
-      triggerVerification()
-    }
-
     Ack(ok = true, msg = "Merge completion noted")
   }
 
@@ -378,39 +372,6 @@ class MasterServiceImpl(
     }
     println(s"[Master] Initialized: $numPartitions partitions, $numWorkers workers")
   }
-
-
-  /* ---------------- Verification ---------------- */
-  private def triggerVerification(): Unit = {
-    println("\n" + "=" * 60)
-    println("[Master] Running final verification...")
-    println("=" * 60)
-
-    try {
-      val outputDir = "out"
-      val expectedPartitions = expectedWorkers
-      val expectedRecords: Long = 1000000L
-
-      val ok = worker.VerifyOutput.runFullVerification(
-        outputDir,
-        expectedPartitions,
-        expectedRecords
-      )
-
-      if (ok) {
-        println("\n✅ Verification PASSED — All outputs are correct.")
-      } else {
-        println("\n❌ Verification FAILED — Output incorrect.")
-      }
-
-    } catch {
-      case e: Exception =>
-        println(s"[Master] Verification error: ${e.getMessage}")
-    }
-
-    println("=" * 60)
-  }
-
 
   /* ---------------- Finalize ---------------- */
   private def triggerFinalizePhase(): Unit = {

@@ -6,53 +6,46 @@ import rpc.sort._
 
 object WorkerState {
   @volatile private var _masterClient: Option[MasterClient] = None
-  @volatile private var _workerId: Int = -1
+  @volatile private var _workerInfo: Option[WorkerInfo] = None
   @volatile private var _workerAddresses: Option[Map[Int, (String, Int)]] = None
-
-  private var _inputPaths: Seq[String] = Seq.empty
-
+  
   private var _shuffleReport: Option[ShuffleCompletionReport] = None
-
   private val finalizeLatch = new CountDownLatch(1)
 
-  def setInputPaths(paths: Seq[String]): Unit = {
-    _inputPaths = paths
-    println(s"[WorkerState] Stored ${paths.size} input paths")
+  // ===== WorkerInfo 관련 =====
+  def setWorkerInfo(info: WorkerInfo): Unit = {
+    _workerInfo = Some(info)
+    println(s"[WorkerState] Stored WorkerInfo: id=${info.id}, port=${info.port}")
   }
 
-  def getInputPaths: Seq[String] = _inputPaths
+  def getWorkerInfo: Option[WorkerInfo] = _workerInfo
 
+  // Convenience getters
+  def getWorkerId: Int = _workerInfo.map(_.id.toInt).getOrElse(-1)
+  
+  def getInputPaths: Seq[String] = _workerInfo.map(_.inputDirs).getOrElse(Seq.empty)
+
+  // ===== MasterClient 관련 =====
   def setMasterClient(client: MasterClient): Unit = {
     _masterClient = Some(client)
   }
 
   def getMasterClient: MasterClient = {
-  _masterClient.getOrElse {
+    _masterClient.getOrElse {
       throw new RuntimeException("MasterClient not set!")
     }
   }
 
-  def setWorkerId(id: Int): Unit = {
-    _workerId = id
-  }
-
-  def getWorkerId: Int = _workerId
-
-  /**
-   * PartitionPlan에서 받은 Worker 주소들을 저장
-   * @param addresses Map[workerId -> (ip, port)]
-   */
+  // ===== Worker Addresses 관련 =====
   def setWorkerAddresses(addresses: Map[Int, (String, Int)]): Unit = {
     _workerAddresses = Some(addresses)
     println(s"[WorkerState] Stored ${addresses.size} worker addresses")
   }
 
-  /**
-   * 저장된 Worker 주소 반환
-   */
   def getWorkerAddresses: Option[Map[Int, (String, Int)]] = _workerAddresses
 
-    def setShuffleReport(report: ShuffleCompletionReport): Unit = {
+  // ===== Shuffle Report 관련 =====
+  def setShuffleReport(report: ShuffleCompletionReport): Unit = {
     _shuffleReport = Some(report)
     println(s"[WorkerState] Shuffle report stored: ${report.sendRecords.size} records")
   }
@@ -69,18 +62,17 @@ object WorkerState {
     }
   }
 
-  /**
-   * Merge 완료를 Master에 보고
-   */
+  // ===== Merge Complete 관련 =====
   def reportMergeComplete(): Unit = {
     _masterClient match {
       case Some(client) =>
-        client.reportMergeComplete(_workerId)
+        client.reportMergeComplete(getWorkerId)
       case None =>
         System.err.println("[WorkerState] MasterClient not set!")
     }
   }
 
+  // ===== Finalize 관련 =====
   def signalFinalizeComplete(): Unit = {
     finalizeLatch.countDown()
   }

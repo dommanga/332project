@@ -12,7 +12,7 @@ message Ack {
 }
 
 message WorkerInfo {
-  string id   = 1;   // Worker Identifier
+  int32 id   = 1;   // Worker Identifier
   string ip = 2;                    // Worker IP address
   int32 port = 3;                   // Worker gRPC port
   repeated string input_dirs = 4;   // Input directories (from -I flag)

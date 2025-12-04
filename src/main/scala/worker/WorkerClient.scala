@@ -14,7 +14,6 @@ final case class WorkerConfig(
     masterPort: Int,
     inputPaths: Seq[String],
     outputDir: String,
-    workerId: String,
 )
 
 /** Worker 실행 메인 */
@@ -29,7 +28,6 @@ object WorkerClient extends App {
       println(s"      master   = ${conf.masterHost}:${conf.masterPort}")
       println(s"      inputs   = ${conf.inputPaths.mkString(", ")}")
       println(s"      output   = ${conf.outputDir}")
-      println(s"      id       = ${conf.workerId}")
       println("=============================================")
 
       // Master 클라이언트 생성
@@ -40,7 +38,7 @@ object WorkerClient extends App {
         // 1) Worker 등록
         // ---------------------------------------------------------
         val workerInfo = WorkerInfo(
-          id         = conf.workerId,
+          id         = -1,
           ip         = getLocalIP(),
           port       = 0,
           inputDirs  = conf.inputPaths,
@@ -50,44 +48,43 @@ object WorkerClient extends App {
         val assignment = masterClient.register(workerInfo)
         println(s"➡️  assigned workerId = ${assignment.workerId}, port = ${assignment.assignedPort}")
 
+        val updatedWorkerInfo = workerInfo.copy(
+          id = assignment.workerId,
+          port = assignment.assignedPort
+        )
+        WorkerState.setWorkerInfo(updatedWorkerInfo)
         WorkerState.setMasterClient(masterClient)
-        WorkerState.setWorkerId(assignment.workerId)
-        WorkerState.setInputPaths(conf.inputPaths)
 
         val workerServer = new WorkerServer(assignment.assignedPort, conf.outputDir)
         workerServer.start()
         println(s"🔌 WorkerServer started on port ${assignment.assignedPort}")
 
+        // ---------------------------------------------------------
+        // ❤️ Heartbeat Thread (Week7: Failure Detection)
+        // ---------------------------------------------------------
+        val heartbeatThread = new Thread {
+          setDaemon(true)
+          override def run(): Unit = {
+            while (true) {
+              try {
+                WorkerState.getWorkerInfo match {
+                  case Some(info) =>
+                    masterClient.sendHeartbeat(info)
+                    println(s"💓 Heartbeat sent from worker ${info.id}")
+                  case None =>
+                    println(s"⚠️ WorkerInfo not initialized yet")
+                }
+              } catch {
+                case e: Exception =>
+                  println(s"⚠️ Heartbeat error: ${e.getMessage}")
+              }
 
-// ---------------------------------------------------------
-// ❤️ Heartbeat Thread (Week7: Failure Detection)
-// ---------------------------------------------------------
-val heartbeatThread = new Thread {
-  override def run(): Unit = {
-    while (true) {
-      try {
-        val info = WorkerInfo(
-          id        = conf.workerId,
-          ip        = getLocalIP(),
-          port      = assignment.assignedPort,
-          inputDirs = conf.inputPaths,
-          outputDir = conf.outputDir
-        )
-        masterClient.sendHeartbeat(info) 
-        println(s"💓 Heartbeat sent from worker ${conf.workerId}")
-      } catch {
-        case e: Exception =>
-          println(s"⚠️ Heartbeat error: ${e.getMessage}")
-      }
-
-      Thread.sleep(5000) // 5초마다 보냄
-    }
-  }
-}
-heartbeatThread.setDaemon(true)
-heartbeatThread.start()
-
-
+              Thread.sleep(5000) // 5초마다 보냄
+            }
+          }
+        }
+        heartbeatThread.setDaemon(true)
+        heartbeatThread.start()
 
         // ---------------------------------------------------------
         // 2) 샘플링
@@ -319,6 +316,7 @@ heartbeatThread.start()
         println("Shuffle report sent to Master")
         println("⏳ Waiting for finalize command from Master...")
         WorkerState.awaitFinalizeComplete()
+        heartbeatThread.interrupt()
         println("✅ Worker completed successfully")
 
       } finally {
@@ -386,7 +384,6 @@ heartbeatThread.start()
     val masterPort = masterAddr(1).toInt
     val inputs     = collection.mutable.ArrayBuffer.empty[String]
     var outputDir  = "./out"
-    var workerId   = "worker-1"
 
     var i = 1
     def needValue(opt: String): Boolean = {
@@ -426,8 +423,7 @@ heartbeatThread.start()
           masterHost = masterHost,
           masterPort = masterPort,
           inputPaths = inputs.toSeq,
-          outputDir  = outputDir,
-          workerId   = workerId
+          outputDir  = outputDir
         )
       )
     }
