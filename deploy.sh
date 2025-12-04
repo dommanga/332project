@@ -9,7 +9,8 @@ MASTER_PORT="5000"
 RECORDS_PER_WORKER=100000
 
 # Worker 목록 (필요에 따라 수정)
-WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
+WORKERS=("vm01" "vm02" "vm03")
+# WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
 
 # ============================================
 # 함수 정의
@@ -28,11 +29,10 @@ init_workers() {
 
 # 2. 코드 업데이트 (개발 중 자주 사용)
 update_code() {
-  local BRANCH=${1:-main}  # 기본값 main
-  echo "=== Updating code on all workers (branch: $BRANCH) ==="
+  echo "=== Updating code on all workers ==="
   for host in "${WORKERS[@]}"; do
-    echo "→ $host: git pull && checkout $BRANCH && sbt compile"
-    ssh $host "cd $PROJECT_DIR && git fetch && git checkout $BRANCH && git pull origin $BRANCH && sbt compile"
+    echo "→ $host: git pull && sbt compile"
+    ssh $host "cd $PROJECT_DIR && git pull origin main && sbt compile"
   done
   echo "✅ Code update complete"
 }
