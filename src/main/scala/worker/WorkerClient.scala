@@ -52,6 +52,7 @@ object WorkerClient extends App {
 
         WorkerState.setMasterClient(masterClient)
         WorkerState.setWorkerId(assignment.workerId)
+        WorkerState.setInputPaths(conf.inputPaths)
 
         val workerServer = new WorkerServer(assignment.assignedPort, conf.outputDir)
         workerServer.start()
@@ -209,13 +210,10 @@ heartbeatThread.start()
             
             var attempt = 0
             
-            while (attempt < maxRetries) {
-              // 현재 target 확인 (reassignment 반영)
-              val currentTarget = WorkerState.getTarget(partitionId, originalTarget)
-              
+            while (attempt < maxRetries) {              
               try {
-                val (targetIp, targetPort) = workerAddresses(currentTarget)
-                println(s"  Attempt ${attempt+1}/$maxRetries: p$partitionId → worker#$currentTarget ($targetIp:$targetPort)")
+                val (targetIp, targetPort) = workerAddresses(originalTarget)
+                println(s"  Attempt ${attempt+1}/$maxRetries: p$partitionId → worker#$originalTarget ($targetIp:$targetPort)")
                 
                 val channel = ManagedChannelBuilder
                   .forAddress(targetIp, targetPort)
@@ -227,7 +225,7 @@ heartbeatThread.start()
                 
                 val responseObserver = new StreamObserver[Ack] {
                   override def onNext(v: Ack): Unit =
-                    println(s"    ✓ ACK from worker#$currentTarget: ${v.msg}")
+                    println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
                   
                   override def onError(t: Throwable): Unit = {
                     println(s"    ✗ Error: ${t.getMessage}")
@@ -247,6 +245,7 @@ heartbeatThread.start()
                   val chunk = PartitionChunk(
                     task = Some(TaskId("task-001")),
                     partitionId = s"p$partitionId",
+                    senderId = WorkerState.getWorkerId,
                     payload = ByteString.copyFrom(rec),
                     seq = seq
                   )
@@ -269,13 +268,6 @@ heartbeatThread.start()
                     val backoff = 2000 * attempt  // 2s, 4s, 6s
                     println(s"  ⚠️ Send failed, retry after ${backoff}ms: ${e.getMessage}")
                     Thread.sleep(backoff)
-                    
-                    // Reassignment 확인
-                    val newTarget = WorkerState.getTarget(partitionId, originalTarget)
-                    if (newTarget != currentTarget) {
-                      println(s"  ℹ️ Target changed: worker#$currentTarget → worker#$newTarget")
-                      attempt = 0  // 새 target이면 attempt reset!
-                    }
                   } else {
                     Console.err.println(s"  ❌ Failed to send p$partitionId after $maxRetries attempts")
                     throw new RuntimeException(s"Failed after $maxRetries attempts", e)
@@ -291,6 +283,7 @@ heartbeatThread.start()
         try {
           for ((pid, recs) <- partitioned) {
             val targetWorker = pid % workerAddresses.size
+            checkpointSentPartition(pid, recs, conf.outputDir)
             sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
           }
         } catch {
@@ -304,9 +297,26 @@ heartbeatThread.start()
         println("       🎉 Shuffle Completed")
         println("-------------------------------------------------------")
         
-        // Shuffle 완료 보고
+        println("Shuffle completed, reporting to Master...")
+
+        val sendRecords = partitioned.map { case (pid, _) =>
+          val target = pid % workerAddresses.size
+          PartitionSendRecord(
+            partitionId = pid,
+            targetWorkerId = target,
+            senderId = WorkerState.getWorkerId,
+            success = true
+          )
+        }.toSeq
+
+        val report = ShuffleCompletionReport(
+          workerId = WorkerState.getWorkerId,
+          sendRecords = sendRecords
+        )
+        WorkerState.setShuffleReport(report)
         WorkerState.reportShuffleComplete()
 
+        println("Shuffle report sent to Master")
         println("⏳ Waiting for finalize command from Master...")
         WorkerState.awaitFinalizeComplete()
         println("✅ Worker completed successfully")
@@ -329,6 +339,32 @@ heartbeatThread.start()
       .find(addr => !addr.isLoopbackAddress && addr.getAddress.length == 4)
       .map(_.getHostAddress)
       .getOrElse("127.0.0.1")
+  }
+
+  /**
+   * Sender checkpoint 저장 (Atomic write)
+   */
+  private def checkpointSentPartition(
+    partitionId: Int, 
+    records: Seq[Array[Byte]], 
+    outputDir: String
+  ): Unit = {
+    val checkpointDir = new java.io.File(s"$outputDir/sent-checkpoint")
+    checkpointDir.mkdirs()
+    
+    val tempFile = new java.io.File(checkpointDir, s"sent_p${partitionId}.dat.tmp")
+    val fos = new java.io.FileOutputStream(tempFile)
+    try {
+      records.foreach { rec => fos.write(rec) }
+    } finally {
+      fos.close()
+    }
+    
+    val finalFile = new java.io.File(checkpointDir, s"sent_p${partitionId}.dat")
+    if (finalFile.exists()) finalFile.delete()
+    tempFile.renameTo(finalFile)
+    
+    println(s"  💾 Checkpointed sent_p${partitionId}: ${records.size} records")
   }
 
   // ---------------------------------------------------------

@@ -25,8 +25,19 @@ class WorkerRegistry {
 
   /** Register worker */
   def register(info: WorkerInfo): WorkerAssignment = synchronized {
-    val workerId = nextId
-    nextId += 1
+    val deadWorker = workers.find { case (_, w) => 
+      w.phase == DEAD
+    }
+    
+    val workerId = deadWorker match {
+      case Some((id, _)) => 
+        println(s"[Registry] Reusing ID $id for restarted worker")
+        id
+      case None => 
+        val id = nextId
+        nextId += 1
+        id
+    }
 
     val assignedPort = 6000 + workerId
     val updatedInfo = info.withPort(assignedPort)

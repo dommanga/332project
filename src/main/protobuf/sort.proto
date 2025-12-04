@@ -57,8 +57,9 @@ message PartitionPlan {
 message PartitionChunk {
   TaskId task = 1;
   string partition_id = 2;  // e.g., "p0" 
-  bytes payload = 3;        // Multiple 100-byte records
-  int64 seq = 4;            // Sequence number for ordering/retries
+  int32 sender_id = 3;
+  bytes payload = 4;        // Multiple 100-byte records
+  int64 seq = 5;            // Sequence number for ordering/retries
 }
 
 message StreamDone {
@@ -72,23 +73,6 @@ message BlockMeta {
   int64  size = 3;
 }
 
-// ---------- Worker Failure ----------
-message WorkerFailureNotification {
-  int32 failed_worker_id = 1;
-  repeated PartitionReassignment reassignments = 2;
-}
-
-message PartitionReassignment {
-  int32 partition_id = 1;
-  int32 new_owner_id = 2;
-}
-
-message ShuffleReassignment {
-  int32 original_target = 1;
-  int32 new_target = 2;
-  repeated int32 partition_ids = 3;
-}
-
 // ---------- Services ----------
 // (Called by workers against the master)
 service MasterService {
@@ -100,7 +84,9 @@ service MasterService {
   rpc SendSamples(stream Sample) returns (Splitters);
 
   // Week 5: Shuffle - coordination
-  rpc ReportShuffleComplete(WorkerStatus) returns (Ack);
+  rpc ReportShuffleComplete(ShuffleCompletionReport) returns (Ack);
+  rpc QueryPartitionSenders(PartitionSendersQuery) returns (PartitionSendersResponse);
+  
   rpc ReportMergeComplete(WorkerStatus) returns (Ack);
 }
 
@@ -114,12 +100,43 @@ service WorkerService {
 
   rpc StartShuffle(TaskId) returns (Ack);
   rpc FinalizePartitions(TaskId) returns (Ack);
-
-  rpc UpdateShuffleTarget(ShuffleReassignment) returns (Ack);
+  
+  rpc RecoverPartitions(RecoveryRequest) returns (Ack);
+  rpc RequestPartition(PartitionRequest) returns (stream PartitionChunk);
 }
 
 message WorkerStatus {
   int32 worker_id = 1;
   string phase = 2;  // "shuffle_complete", "merge_complete"
   int64 timestamp = 3;
+}
+
+message ShuffleCompletionReport {
+  int32 worker_id = 1;
+  repeated PartitionSendRecord send_records = 2;
+}
+
+message PartitionSendRecord {
+  int32 partition_id = 1;
+  int32 target_worker_id = 2;
+  int32 sender_id = 3;  // 보낸 사람 (자기 자신)
+  bool success = 4;
+}
+
+message PartitionSendersQuery {
+  int32 partition_id = 1;
+}
+
+message PartitionSendersResponse {
+  int32 partition_id = 1;
+  repeated int32 sender_ids = 2;
+}
+
+message RecoveryRequest {
+  repeated int32 partition_ids = 1;
+}
+
+message PartitionRequest {
+  int32 partition_id = 1;
+  int32 requester_id = 2;
 }

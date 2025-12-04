@@ -1,13 +1,15 @@
 package worker
 
-import io.grpc.{Server, ServerBuilder}
+import io.grpc.{Server, ServerBuilder, ManagedChannelBuilder}
 import rpc.sort.{
   WorkerServiceGrpc, 
   PartitionPlan, 
   Ack, 
   PartitionChunk, 
   TaskId, 
-  ShuffleReassignment}
+  RecoveryRequest,
+  PartitionRequest,
+ }
 import io.grpc.stub.StreamObserver
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -80,70 +82,48 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   }
 
   // -----------------------------
-  //  Partition 데이터 저장소
+  //  Partition 데이터 저장소 (In Memory)
   //   - partition_id 별로 "sorted run" 여러 개를 쌓아둠
   //   - run 하나 = Array[Array[Byte]] (각 원소가 100바이트 레코드)
   // -----------------------------
   object PartitionStore {
-    // 메타데이터만 메모리에 (파일 경로만 저장)
-    private val runFiles = mutable.Map.empty[String, mutable.ArrayBuffer[String]]
+    // 메모리에만 저장 (disk 제거)
+    private val runData = mutable.Map.empty[String, mutable.ArrayBuffer[Array[Array[Byte]]]]
     
-    /** Run을 디스크에 저장하고 path만 메모리에 유지 */
-    def addRun(
-      partitionId: String, 
-      run: Array[Array[Byte]], 
-      checkpointDir: java.io.File
-    ): Unit = this.synchronized {
-      val runIdx = runFiles.getOrElseUpdate(partitionId, mutable.ArrayBuffer.empty).size
-      val fileName = s"${partitionId}_r${runIdx}.dat"
-      val file = new java.io.File(checkpointDir, fileName)
-      
-      // 디스크에 기록
-      val fos = new FileOutputStream(file)
-      try {
-        run.foreach { record =>
-          fos.write(record)
-        }
-        println(s"[Checkpoint] ${fileName}: ${run.length} records")
-      } finally {
-        fos.close()
-      }
-      
-      // Path만 메모리에
-      val paths = runFiles.getOrElseUpdate(partitionId, mutable.ArrayBuffer.empty)
-      paths += file.getAbsolutePath
+    def addRun(partitionId: String, run: Array[Array[Byte]], checkpointDir: java.io.File): Unit = this.synchronized {
+      val runs = runData.getOrElseUpdate(partitionId, mutable.ArrayBuffer.empty)
+      runs += run
+      println(s"[PartitionStore] Added run to $partitionId: ${run.length} records (memory only)")
     }
     
-    /** Partition의 모든 run 파일들을 로드 */
     def loadRuns(partitionId: String): List[Array[Array[Byte]]] = this.synchronized {
-      runFiles.get(partitionId) match {
-        case Some(runPaths) =>
-          runPaths.map { path =>
-            val file = new java.io.File(path)
-            val bytes = Files.readAllBytes(file.toPath)
-            
-            // 100바이트씩 잘라서 Array로
-            val recordSize = RecordIO.RecordSize
-            val numRecords = bytes.length / recordSize
-            (0 until numRecords).map { i =>
-              java.util.Arrays.copyOfRange(bytes, i * recordSize, (i + 1) * recordSize)
-            }.toArray
-          }.toList
-          
-        case None => Nil
-      }
+      runData.get(partitionId).map(_.toList).getOrElse(Nil)
     }
     
-    /** 해당 partition의 runs를 꺼내면서 메모리에서 제거 */
     def drainRuns(partitionId: String): List[Array[Array[Byte]]] = this.synchronized {
       val runs = loadRuns(partitionId)
-      runFiles.remove(partitionId)
+      runData.remove(partitionId)
       runs
     }
     
-    /** 현재까지 들어온 partition_id 전체 리스트 */
     def allPartitionIds: List[String] = this.synchronized {
-      runFiles.keys.toList
+      runData.keys.toList
+    }
+
+    def getSendersForPartition(partitionId: String): Set[Int] = this.synchronized {
+      runData.keys
+        .filter(_.startsWith(s"${partitionId}_from_w"))
+        .map { key =>
+          key.split("_from_w")(1).toInt
+        }
+        .toSet
+    }
+
+    def loadAllRunsForPartition(partitionId: String): List[Array[Array[Byte]]] = this.synchronized {
+      runData.keys
+        .filter(_.startsWith(s"${partitionId}_"))
+        .flatMap(runId => runData(runId))
+        .toList
     }
   }
 
@@ -184,37 +164,21 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   override def pushPartition(responseObserver: StreamObserver[Ack]): StreamObserver[PartitionChunk] = {
     new StreamObserver[PartitionChunk] {
       private var countChunks: Long = 0L
-      private var lastPid: String   = ""
-      private var lastSeq: Long     = -1L
       private var currentPid: Option[String] = None
-
-      // 이 stream 에서 받은 record들을 전부 모으는 버퍼
+      private var senderId: Int = -1
       private val recordBuffer = mutable.ArrayBuffer.empty[Array[Byte]]
 
       override def onNext(ch: PartitionChunk): Unit = {
         countChunks += 1
-        lastPid = ch.partitionId
-        lastSeq = ch.seq
-
+        
         if (currentPid.isEmpty) {
           currentPid = Some(ch.partitionId)
-        } else if (currentPid.get != ch.partitionId) {
-          System.err.println(
-            s"[Worker] pushPartition: mixed partitionIds in one stream: " +
-              s"${currentPid.get} vs ${ch.partitionId}"
-          )
+          senderId = ch.senderId
         }
-
-        // payload 안에서 100바이트 레코드들을 잘라냄
-        val bytes  = ch.payload.toByteArray
+        
+        val bytes = ch.payload.toByteArray
         val recLen = RecordIO.RecordSize
-
-        if (bytes.length % recLen != 0) {
-          System.err.println(
-            s"[Worker] WARNING: payload length ${bytes.length} is not multiple of RecordSize=$recLen"
-          )
-        }
-
+        
         var offset = 0
         while (offset + recLen <= bytes.length) {
           val rec = java.util.Arrays.copyOfRange(bytes, offset, offset + recLen)
@@ -224,25 +188,22 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
       }
 
       override def onError(t: Throwable): Unit = {
-        System.err.println(s"[Worker] pushPartition stream error: ${t.getMessage}")
+        Console.err.println(s"[Worker] pushPartition stream error: ${t.getMessage}")
+        responseObserver.onError(t)
       }
 
       override def onCompleted(): Unit = {
-        val pid = currentPid.getOrElse {
-          System.err.println("[Worker] pushPartition completed with no data")
-          ""
-        }
-
-        val run: Array[Array[Byte]] = recordBuffer.toArray
+        val pid = currentPid.getOrElse("")
+        val run = recordBuffer.toArray
+        
         if (pid.nonEmpty && run.nonEmpty) {
-          PartitionStore.addRun(pid, run, checkpointDir)
+          // Include sender info
+          val runId = s"${pid}_from_w${senderId}"
+          PartitionStore.addRun(runId, run, checkpointDir)
+          println(s"[Worker] Received $pid from worker#$senderId: ${run.length} records")
         }
-
-        println(
-          s"[Worker] pushPartition completed: partition=$pid chunks=$countChunks lastSeq=$lastSeq records=${run.length}"
-        )
-
-        responseObserver.onNext(Ack(ok = true, msg = s"received $countChunks chunks (${run.length} records) for $pid"))
+        
+        responseObserver.onNext(Ack(ok = true, msg = s"Received ${run.length} records"))
         responseObserver.onCompleted()
       }
     }
@@ -299,13 +260,14 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
   /** partitionId에 해당하는 run들을 K-way merge 해서 파일로 쓰기 */
   def finalizePartition(partitionId: String): Unit = {
-    val runs: List[Array[Array[Byte]]] = PartitionStore.drainRuns(partitionId)
-
+    // 모든 sender들의 runs를 load
+    val runs: List[Array[Array[Byte]]] = PartitionStore.loadAllRunsForPartition(partitionId)
+    
     if (runs.isEmpty) {
       println(s"[Worker] finalizePartition($partitionId): no data")
       return
     }
-
+    
     val mergedIter: Iterator[Array[Byte]] = mergeRuns(runs)
     writePartitionToFile(partitionId, mergedIter)
   }
@@ -352,23 +314,6 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   private def bytesToHex(arr: Array[Byte]): String =
     arr.map("%02X".format(_)).mkString
 
-  override def updateShuffleTarget(request: ShuffleReassignment): Future[Ack] = {
-    Future {
-      // TODO: 실제로는 여기서 이 워커의 shuffle 송신 대상 맵을 업데이트해야 함.
-      //       (예: WorkerState나 별도 ShuffleState에 반영)
-      val pids = request.partitionIds.mkString(",")
-      println(
-        s"[Worker] UpdateShuffleTarget: original=${request.originalTarget}, " +
-          s"new=${request.newTarget}, partitions=[$pids]"
-      )
-
-      Ack(
-        ok = true,
-        msg = s"Updated shuffle target to ${request.newTarget} for ${request.partitionIds.size} partitions"
-      )
-    }
-  }
-
   override def startShuffle(taskId: TaskId): Future[Ack] = {
     Future {
       println(s"[Worker] Received StartShuffle command for task=${taskId.id}")
@@ -379,16 +324,122 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
   override def finalizePartitions(taskId: TaskId): Future[Ack] = {
     Future {
-      println(s"[Worker] Received FinalizePartitions command for task=${taskId.id}")
-
+      println(s"[Worker] Received FinalizePartitions command")
+      
+      // Missing Detection
+      detectAndRequestMissingPartitions()
+      
       finalizeAll()
-
+      
       reportMergeCompleteToMaster()
-
-      // To let worker client shutdown
       WorkerState.signalFinalizeComplete()
-
+      
       Ack(ok = true, msg = "Finalize complete")
+    }
+  }
+
+  private def detectAndRequestMissingPartitions(): Unit = {
+    val plan = PlanStore.get
+    if (plan.isEmpty) {
+      println("[Worker] No partition plan")
+      return
+    }
+    
+    val myId = WorkerState.getWorkerId
+    val totalWorkers = plan.get.workers.size
+    
+    // 내가 받아야 하는 partitions
+    val expectedPartitions = (0 until 100).filter(_ % totalWorkers == myId)
+    
+    println(s"[Worker] Checking ${expectedPartitions.size} partitions for missing senders...")
+    
+    expectedPartitions.foreach { pid =>
+      // 이 partition을 보냈어야 하는 senders (Master에게 query)
+      val expectedSenders = WorkerState.getMasterClient.queryPartitionSenders(pid).toSet
+      
+      // 실제로 받은 senders
+      val receivedSenders = PartitionStore.getSendersForPartition(s"p$pid")
+      
+      val missingSenders = expectedSenders -- receivedSenders
+      
+      if (missingSenders.nonEmpty) {
+        println(s"[Worker] p$pid missing from workers: $missingSenders")
+        
+        // Missing sender들에게 요청
+        missingSenders.foreach { senderId =>
+          requestPartitionFromWorker(senderId, pid)
+        }
+      }
+    }
+    
+    println("[Worker] Missing detection complete")
+  }
+
+  private def requestPartitionFromWorker(senderId: Int, partitionId: Int): Unit = {
+    WorkerState.getWorkerAddresses match {
+      case Some(addresses) =>
+        addresses.get(senderId) match {
+          case Some((ip, port)) =>
+            println(s"[Worker] Requesting p$partitionId from worker#$senderId...")
+            
+            try {
+              val channel = ManagedChannelBuilder
+                .forAddress(ip, port)
+                .usePlaintext()
+                .build()
+              
+              val stub = WorkerServiceGrpc.stub(channel)
+              val myId = WorkerState.getWorkerId
+              val request = PartitionRequest(
+                partitionId = partitionId,
+                requesterId = myId
+              )
+              
+              val latch = new java.util.concurrent.CountDownLatch(1)
+              val recordBuffer = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+              
+              val responseObserver = new StreamObserver[PartitionChunk] {
+                override def onNext(chunk: PartitionChunk): Unit = {
+                  val bytes = chunk.payload.toByteArray
+                  val recLen = RecordIO.RecordSize
+                  var offset = 0
+                  while (offset + recLen <= bytes.length) {
+                    val rec = java.util.Arrays.copyOfRange(bytes, offset, offset + recLen)
+                    recordBuffer += rec
+                    offset += recLen
+                  }
+                }
+                
+                override def onError(t: Throwable): Unit = {
+                  Console.err.println(s"[Worker] Error from worker#$senderId: ${t.getMessage}")
+                  latch.countDown()
+                }
+                
+                override def onCompleted(): Unit = {
+                  if (recordBuffer.nonEmpty) {
+                    val runId = s"p${partitionId}_from_w$senderId"
+                    PartitionStore.addRun(runId, recordBuffer.toArray, checkpointDir)
+                    println(s"[Worker] ✅ Received p$partitionId from worker#$senderId: ${recordBuffer.size} records")
+                  }
+                  latch.countDown()
+                }
+              }
+              
+              stub.requestPartition(request, responseObserver)
+              latch.await(60, java.util.concurrent.TimeUnit.SECONDS)
+              channel.shutdown()
+              
+            } catch {
+              case e: Exception =>
+                Console.err.println(s"[Worker] ❌ Failed to request from worker#$senderId: ${e.getMessage}")
+            }
+            
+          case None =>
+            Console.err.println(s"[Worker] Worker#$senderId address not found")
+        }
+        
+      case None =>
+        Console.err.println("[Worker] No worker addresses")
     }
   }
 
@@ -396,34 +447,297 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     WorkerState.reportMergeComplete()
   }
 
-  override def updateShuffleTarget(reassignment: ShuffleReassignment): Future[Ack] = {
+  override def recoverPartitions(request: RecoveryRequest): Future[Ack] = {
     Future {
-      println(s"[Worker] Target update: ${reassignment.originalTarget} → ${reassignment.newTarget}")
-      reassignment.partitionIds.foreach { pid =>
-        WorkerState.updateTarget(pid, reassignment.newTarget)
+      val partitionIds = request.partitionIds
+      
+      println(s"\n${"=" * 60}")
+      println(s"[Worker] 🔄 RECOVERY STARTED")
+      println(s"[Worker] Partitions to recover: ${partitionIds.mkString(", ")}")
+      println(s"${"=" * 60}\n")
+      
+      partitionIds.foreach { pid =>
+        try {
+          recoverPartition(pid)
+          println(s"[Worker] ✅ Partition p$pid recovered")
+        } catch {
+          case e: Exception =>
+            Console.err.println(s"[Worker] ❌ Failed to recover p$pid: ${e.getMessage}")
+            e.printStackTrace()
+        }
       }
-      Ack(ok = true, msg = "Target updated")
+      
+      println(s"[Worker] Reporting merge complete to Master...")
+      reportMergeCompleteToMaster()
+      WorkerState.signalFinalizeComplete()
+      
+      println(s"\n${"=" * 60}")
+      println(s"[Worker] 🎉 RECOVERY COMPLETED")
+      println(s"${"=" * 60}\n")
+      
+      Ack(ok = true, msg = s"Recovered ${partitionIds.size} partitions")
     }
   }
 
-  override def notifyWorkerFailure(notification: WorkerFailureNotification): Future[Ack] = {
-    Future {
-      val failedId = notification.failedWorkerId
-      val newPartitions = notification.reassignments.map(_.partitionId).toSet
+  override def requestPartition(
+    request: PartitionRequest,
+    responseObserver: StreamObserver[PartitionChunk]
+  ): Unit = {
+    val partitionId = request.partitionId
+    val requesterId = request.requesterId
+    
+    println(s"[Worker] Partition request: p$partitionId from worker#$requesterId")
+    
+    try {
+      val checkpointFile = new java.io.File(
+        s"$outputDir/sent-checkpoint/sent_p${partitionId}.dat"
+      )
       
-      println(s"[Worker] Worker $failedId failed. Taking over: $newPartitions")
-      
-      val existing = PartitionStore.allPartitionIds
-        .filter(_.startsWith("p"))
-        .map(_.drop(1).toInt)
-        .toSet
-      
-      val missing = newPartitions -- existing
-      if (missing.nonEmpty) {
-        println(s"[Worker] Will recover: $missing")
+      if (!checkpointFile.exists()) {
+        println(s"[Worker]   Checkpoint missing, regenerating...")
+        regenerateAndSendPartition(partitionId, responseObserver)
+        return
       }
       
-      Ack(ok = true, msg = "Takeover acknowledged")
+      println(s"[Worker]   Sending checkpoint from disk")
+      val bytes = java.nio.file.Files.readAllBytes(checkpointFile.toPath)
+      val recordSize = RecordIO.RecordSize
+      
+      val chunkSize = 1000 * recordSize
+      var offset = 0
+      var seq = 0L
+      
+      while (offset < bytes.length) {
+        val end = Math.min(offset + chunkSize, bytes.length)
+        val chunkBytes = java.util.Arrays.copyOfRange(bytes, offset, end)
+        
+        val chunk = PartitionChunk(
+          task = Some(TaskId("recovery")),
+          partitionId = s"p$partitionId",
+          senderId = WorkerState.getWorkerId,
+          payload = com.google.protobuf.ByteString.copyFrom(chunkBytes),
+          seq = seq
+        )
+        
+        responseObserver.onNext(chunk)
+        offset = end
+        seq += 1
+      }
+      
+      responseObserver.onCompleted()
+      println(s"[Worker]   ✅ Sent ${bytes.length / recordSize} records")
+      
+    } catch {
+      case e: Exception =>
+        Console.err.println(s"[Worker]   ❌ Error: ${e.getMessage}")
+        responseObserver.onError(e)
     }
+  }
+
+  /**
+   * 단일 partition 복구
+   */
+  private def recoverPartition(partitionId: Int): Unit = {
+    println(s"[Worker] Recovering partition p$partitionId...")
+    
+    // Step 1: 자기 sent checkpoint 확인
+    val sentFile = new java.io.File(s"$outputDir/sent-checkpoint/sent_p${partitionId}.dat")
+    
+    val myData = if (sentFile.exists() && sentFile.length() > 0) {
+      println(s"[Worker] Step 1: Loading own checkpoint")
+      loadCheckpointFile(sentFile)
+    } else {
+      println(s"[Worker] Step 1: Regenerating from input")
+      regenerateOwnPartition(partitionId)
+    }
+    
+    if (myData.nonEmpty) {
+      PartitionStore.addRun(s"p$partitionId", myData, checkpointDir)
+    }
+    
+    // Step 2: Peer들에게 요청
+    println(s"[Worker] Step 2: Requesting from peers")
+    requestCheckpointsFromPeers(partitionId)
+    
+    // Step 3: Merge
+    println(s"[Worker] Step 3: Merging")
+    finalizePartition(s"p$partitionId")
+  }
+
+  private def loadCheckpointFile(file: java.io.File): Array[Array[Byte]] = {
+    val bytes = java.nio.file.Files.readAllBytes(file.toPath)
+    val recordSize = RecordIO.RecordSize
+    val numRecords = bytes.length / recordSize
+    
+    (0 until numRecords).map { i =>
+      java.util.Arrays.copyOfRange(bytes, i * recordSize, (i + 1) * recordSize)
+    }.toArray
+  }
+
+  private def regenerateOwnPartition(partitionId: Int): Array[Array[Byte]] = {
+    val inputPaths = WorkerState.getInputPaths
+    if (inputPaths.isEmpty) {
+      Console.err.println(s"[Worker] ⚠️ No input paths!")
+      return Array.empty
+    }
+    
+    // Input 읽기
+    def readAll(path: String): Vector[Array[Byte]] = {
+      val file = new java.io.File(path)
+      val files = if (file.isDirectory) {
+        file.listFiles().filter(_.isFile).toSeq
+      } else {
+        Seq(file)
+      }
+      
+      files.flatMap { f =>
+        val buf = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+        RecordIO.streamRecords(f.getPath) { (key, value) =>
+          val rec = new Array[Byte](RecordIO.RecordSize)
+          System.arraycopy(key, 0, rec, 0, RecordIO.KeySize)
+          System.arraycopy(value, 0, rec, RecordIO.KeySize, RecordIO.RecordSize - RecordIO.KeySize)
+          buf += rec
+        }
+        buf
+      }.toVector
+    }
+    
+    val allRecords = inputPaths.flatMap(readAll).toVector
+    println(s"[Worker]   Loaded ${allRecords.size} records")
+    
+    // Sort
+    val sorted = allRecords.sortWith { (a, b) =>
+      RecordIO.compareKeys(keyOf(a), keyOf(b)) < 0
+    }
+    
+    // Extract partition
+    val plan = PlanStore.get
+    if (plan.isEmpty) {
+      Console.err.println(s"[Worker] ⚠️ No partition plan!")
+      return Array.empty
+    }
+    
+    val splitters = plan.get.ranges.dropRight(1).map(_.hi.toByteArray)
+    
+    def findPartition(key: Array[Byte]): Int = {
+      var idx = 0
+      while (idx < splitters.length && RecordIO.compareKeys(splitters(idx), key) < 0) {
+        idx += 1
+      }
+      idx
+    }
+    
+    val myPartitionData = sorted.filter { rec =>
+      findPartition(keyOf(rec)) == partitionId
+    }
+    
+    println(s"[Worker]   Extracted ${myPartitionData.size} records for p$partitionId")
+    
+    // Checkpoint 저장
+    val checkpointDir = new java.io.File(s"$outputDir/sent-checkpoint")
+    checkpointDir.mkdirs()
+    val checkpointFile = new java.io.File(checkpointDir, s"sent_p${partitionId}.dat")
+    val fos = new java.io.FileOutputStream(checkpointFile)
+    try {
+      myPartitionData.foreach { rec => fos.write(rec) }
+    } finally {
+      fos.close()
+    }
+    
+    myPartitionData.toArray
+  }
+
+  private def requestCheckpointsFromPeers(partitionId: Int): Unit = {
+    WorkerState.getWorkerAddresses match {
+      case Some(addresses) =>
+        val myId = WorkerState.getWorkerId
+        val otherWorkers = addresses.filter { case (wid, _) => wid != myId }
+        
+        otherWorkers.foreach { case (wid, (ip, port)) =>
+          try {
+            val channel = ManagedChannelBuilder
+              .forAddress(ip, port)
+              .usePlaintext()
+              .build()
+            
+            val stub = WorkerServiceGrpc.stub(channel)
+            val request = PartitionRequest(
+              partitionId = partitionId,
+              requesterId = myId
+            )
+            
+            val latch = new java.util.concurrent.CountDownLatch(1)
+            val recordBuffer = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+            
+            val responseObserver = new StreamObserver[PartitionChunk] {
+              override def onNext(chunk: PartitionChunk): Unit = {
+                val bytes = chunk.payload.toByteArray
+                val recLen = RecordIO.RecordSize
+                var offset = 0
+                while (offset + recLen <= bytes.length) {
+                  val rec = java.util.Arrays.copyOfRange(bytes, offset, offset + recLen)
+                  recordBuffer += rec
+                  offset += recLen
+                }
+              }
+              
+              override def onError(t: Throwable): Unit = {
+                println(s"[Worker]     Error from worker#$wid: ${t.getMessage}")
+                latch.countDown()
+              }
+              
+              override def onCompleted(): Unit = {
+                if (recordBuffer.nonEmpty) {
+                  val runId = s"p${partitionId}_from_w$wid"
+                  PartitionStore.addRun(runId, recordBuffer.toArray, checkpointDir)
+                  println(s"[Worker]     ✅ Received ${recordBuffer.size} records from worker#$wid")
+                }
+                latch.countDown()
+              }
+            }
+            
+            stub.requestPartition(request, responseObserver)
+            latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            channel.shutdown()
+            
+          } catch {
+            case e: Exception =>
+              println(s"[Worker]     ⚠️ Failed from worker#$wid: ${e.getMessage}")
+          }
+        }
+        
+      case None =>
+        Console.err.println("[Worker] ⚠️ No worker addresses!")
+    }
+  }
+
+  private def regenerateAndSendPartition(
+    partitionId: Int,
+    responseObserver: StreamObserver[PartitionChunk]
+  ): Unit = {
+    println(s"[Worker]   Regenerating p$partitionId for requester...")
+    
+    val data = regenerateOwnPartition(partitionId)
+    val recordSize = RecordIO.RecordSize
+    val chunkSize = 1000 * recordSize
+    
+    var offset = 0
+    var seq = 0L
+    
+    data.grouped(1000).foreach { batch =>
+      val bytes = batch.flatMap(_.toSeq).toArray
+      val chunk = PartitionChunk(
+        task = Some(TaskId("recovery")),
+        partitionId = s"p$partitionId",
+        senderId = WorkerState.getWorkerId,
+        payload = com.google.protobuf.ByteString.copyFrom(bytes),
+        seq = seq
+      )
+      responseObserver.onNext(chunk)
+      seq += 1
+    }
+    
+    responseObserver.onCompleted()
+    println(s"[Worker]   ✅ Sent regenerated ${data.length} records")
   }
 }
