@@ -327,7 +327,7 @@ object WorkerClient extends App {
       Console.err.println(s"❌ Worker error: ${e.getMessage}")
       e.printStackTrace()
       HeartbeatManager.stop()
-      
+
       try {
         WorkerState.getMasterClient.shutdown()
       } catch {
@@ -384,14 +384,7 @@ object WorkerClient extends App {
       return None
     }
 
-    val masterAddr = args(0).split(":", 2)
-    if (masterAddr.length != 2) {
-      Console.err.println("Invalid master address format. Use HOST:PORT")
-      return None
-    }
-  
-    val masterHost = masterAddr(0)
-    val masterPort = masterAddr(1).toInt
+    val masterAddr = args(0)
     val inputs     = collection.mutable.ArrayBuffer.empty[String]
     var outputDir  = "./out"
 
@@ -430,8 +423,7 @@ object WorkerClient extends App {
     } else {
       Some(
         WorkerConfig(
-          masterHost = masterHost,
-          masterPort = masterPort,
+          masterAddr = masterAddr,
           inputPaths = inputs.toSeq,
           outputDir  = outputDir
         )
