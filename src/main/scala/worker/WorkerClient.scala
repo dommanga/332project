@@ -359,22 +359,30 @@ object WorkerClient {
       println("-------------------------------------------------------")
 
       try {      
-        val shuffleFutures = partitioned.map { case (pid, recs) =>
-          Future {
-            val targetWorker = pid % workerAddresses.size
-            
-            checkpointSentPartition(pid, recs, conf.outputDir)
-            
-            // Network 전송 (병렬화)
-            sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
-            
-            println(s"  ✨ Worker thread completed p$pid")
+        val maxParallel = 4
+
+        // Partition을 4개씩 묶어서 처리
+        val batches = partitioned.toSeq.grouped(maxParallel).toSeq
+        
+        println(s"  📦 Total ${partitioned.size} partitions in ${batches.size} batches")
+        
+        batches.zipWithIndex.foreach { case (batch, batchIdx) =>
+          println(s"  🔄 Batch ${batchIdx + 1}/${batches.size}: partitions ${batch.map(_._1).mkString(", ")}")
+          
+          val batchFutures = batch.map { case (pid, recs) =>
+            Future {
+              val targetWorker = pid % workerAddresses.size
+              checkpointSentPartition(pid, recs, conf.outputDir)
+              sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
+              pid
+            }
           }
-        }.toSeq
-        
-        println(s"  🔄 Waiting for ${shuffleFutures.size} parallel transfers...")
-        Await.result(Future.sequence(shuffleFutures), 120.seconds)
-        
+          
+          // 이번 batch 완료 대기
+          val completedPids = Await.result(Future.sequence(batchFutures), 90.seconds)
+          println(s"  ✅ Batch ${batchIdx + 1} complete: ${completedPids.mkString(", ")}")
+        }
+
       } catch {
         case e: Exception =>
           Console.err.println(s"❌ Shuffle failed: ${e.getMessage}")
