@@ -60,11 +60,11 @@ class WorkerRegistry {
 
   /** Update heartbeat */
   def updateHeartbeat(info: WorkerInfo): Ack = synchronized {
-    workers.find(_._2.workerInfo.id == info.id) match {
-      case Some((id, w)) =>
-        workers(id) = w.copy(lastHeartbeat = Instant.now(), phase = ALIVE)
+    workers.get(info.id) match {
+      case Some(w) =>
+        workers(info.id) = w.copy(lastHeartbeat = Instant.now(), phase = ALIVE)
         Ack(ok = true, msg = s"Heartbeat updated for worker ${info.id}")
-
+      
       case None =>
         Ack(ok = false, msg = s"Unknown worker: ${info.id}")
     }
