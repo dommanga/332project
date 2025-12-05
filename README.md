@@ -152,7 +152,10 @@ cd ~/332project
 On the Master server (vm-1-master):
 
 ```bash
-sbt -J-Xms1G -J-Xmx2G 'runMain master.MasterServer 3'
+sbt \
+-J-Xms1G \
+-J-Xmx2G \
+-J-XX:MaxDirectMemorySize=4G \ 'runMain master.MasterServer 2'
 ```
 
 Expected output:
@@ -170,6 +173,13 @@ On each Worker VM (via ssh):
 ```bash
 # vm01 (2.2.2.101)
 sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/out"
+
+sbt \
+-J-Xms2G \
+-J-Xmx4G \
+-J-XX:MaxDirectMemorySize=8G \
+-J-XX:+UseG1GC \
+-J-XX:MaxGCPauseMillis=200 \ 'runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/out'
 
 # vm02 (2.2.2.102)
 sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/out"
