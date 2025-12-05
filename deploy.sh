@@ -10,10 +10,10 @@ MASTER_IP="2.2.2.254"
 MASTER_PORT="5100"
 RECORDS_PER_WORKER=100000
 
-DEFAULT_NUM_WORKERS=2
+DEFAULT_NUM_WORKERS=20
 
-# ALL_WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
-ALL_WORKERS=("vm17" "vm18")
+ALL_WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
+# ALL_WORKERS=("vm17" "vm18")
 
 # ============================================
 # 함수 정의
@@ -46,14 +46,15 @@ update_code() {
   echo "✅ Code update complete"
 }
 
-# 3. gensort 배포 (최초 1회)
+# 3. gensort + valsort 배포 (최초 1회)
 deploy_gensort() {
-  echo "=== Deploying gensort to workers ==="
+  echo "=== Deploying gensort and valsort to workers ==="
   for host in "${WORKERS[@]}"; do
     echo "→ $host"
     scp $PROJECT_DIR/gensort $host:$PROJECT_DIR/
+    scp $PROJECT_DIR/valsort $host:$PROJECT_DIR/
   done
-  echo "✅ gensort deployed"
+  echo "✅ gensort and valsort deployed"
 }
 
 # 4. 테스트 데이터 생성
@@ -103,7 +104,7 @@ usage() {
   echo "Commands:"
   echo "  init        - Initial setup (git clone, mkdir)"
   echo "  update      - Git pull && sbt compile on all workers"
-  echo "  gensort     - Deploy gensort binary to workers"
+  echo "  gensort     - Deploy gensort and valsort binaries to workers"
   echo "  gendata     - Generate test data on workers"
   echo "  clean       - Clean output directories"
   echo "  reset       - Clean output + generate new data"
