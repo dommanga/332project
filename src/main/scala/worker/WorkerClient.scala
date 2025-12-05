@@ -16,7 +16,7 @@ final case class WorkerConfig(
 )
 
 /** Worker 실행 메인 */
-object WorkerClient extends App {
+object WorkerClient {
 
   // ===== Heartbeat Manager =====
   object HeartbeatManager {
@@ -51,290 +51,293 @@ object WorkerClient extends App {
     }
   }
 
-  // ===== Shutdown Hook =====
-  sys.addShutdownHook {
-    println("🛑 Shutting down worker...")
-    HeartbeatManager.stop()
-  }
-
-  // ===== Main Logic =====
-  try {
-    val conf = parseArgs(args).getOrElse {
-      System.exit(1)
-      return
+  // ===== Main Entry Point =====
+  def main(args: Array[String]): Unit = {
+    // Shutdown Hook
+    sys.addShutdownHook {
+      println("🛑 Shutting down worker...")
+      HeartbeatManager.stop()
     }
-    
-    val masterAddr = conf.masterAddr.split(":")
-    val workerInfo = WorkerInfo(
-      id = -1,
-      ip = getLocalIP(),
-      port = 6000   // Default
-    )
-    
-    val masterClient = new MasterClient(masterAddr(0), masterAddr(1).toInt)(
-      scala.concurrent.ExecutionContext.global
-    )
-
-    val assignment = masterClient.register(workerInfo)
-
-    println("=============================================")
-    println("   ✅ Worker started with master assignment")
-    println(s"      master   = ${conf.masterAddr}")
-    println(s"      inputs   = ${conf.inputPaths.mkString(", ")}")
-    println(s"      output   = ${conf.outputDir}")
-    println(s"      id       = ${assignment.workerId}")
-    println(s"      port     = ${assignment.assignedPort}")
-    println("=============================================")
-    
-    val updatedWorkerInfo = workerInfo.copy(
-      id = assignment.workerId,
-      port = assignment.assignedPort
-    )
-    WorkerState.setWorkerInfo(updatedWorkerInfo)
-    WorkerState.setMasterClient(masterClient)
-    
-    val workerServer = new WorkerServer(assignment.assignedPort, conf.outputDir)
-    workerServer.start()
-    println(s"🔌 WorkerServer started on port ${assignment.assignedPort}")
-
-    HeartbeatManager.start(updatedWorkerInfo, masterClient)
-
-    // ---------------------------------------------------------
-    // Sampling
-    // ---------------------------------------------------------
-    val samples = common.Sampling.uniformEveryN(conf.inputPaths, everyN = 1000)
-    println(s"➡️  collected ${samples.size} sample keys")
-
-    // ---------------------------------------------------------
-    // Splitters 수신
-    // ---------------------------------------------------------
-    val splitters = masterClient.sendSamples(samples)
-    println(s"➡️  received ${splitters.key.size} splitters from Master")
-
-    // ---------------------------------------------------------
-    // Helper functions
-    // ---------------------------------------------------------
-    def extractKey(rec: Array[Byte]): Array[Byte] =
-      java.util.Arrays.copyOfRange(rec, 0, RecordIO.KeySize)
-
-    def readAll(path: String): Vector[Array[Byte]] = {
-      val file = new java.io.File(path)
-      val files = if (file.isDirectory) {
-        file.listFiles().filter(_.isFile).toSeq
-      } else {
-        Seq(file)
+    try {
+      val conf = parseArgs(args) match {
+        case Some(c) => c
+        case None =>
+          System.exit(1)
+          return
       }
       
-      files.flatMap { f =>
-        val buf = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
-        RecordIO.streamRecords(f.getPath) { (key, value) =>
-          val rec = new Array[Byte](RecordIO.RecordSize)
-          System.arraycopy(key, 0, rec, 0, RecordIO.KeySize)
-          System.arraycopy(value, 0, rec, RecordIO.KeySize, RecordIO.RecordSize - RecordIO.KeySize)
-          buf += rec
+      val masterAddr = conf.masterAddr.split(":")
+      val workerInfo = WorkerInfo(
+        id = -1,
+        ip = getLocalIP(),
+        port = 6000   // Default
+      )
+      
+      val masterClient = new MasterClient(masterAddr(0), masterAddr(1).toInt)(
+        scala.concurrent.ExecutionContext.global
+      )
+
+      val assignment = masterClient.register(workerInfo)
+
+      println("=============================================")
+      println("   ✅ Worker started with master assignment")
+      println(s"      master   = ${conf.masterAddr}")
+      println(s"      inputs   = ${conf.inputPaths.mkString(", ")}")
+      println(s"      output   = ${conf.outputDir}")
+      println(s"      id       = ${assignment.workerId}")
+      println(s"      port     = ${assignment.assignedPort}")
+      println("=============================================")
+      
+      val updatedWorkerInfo = workerInfo.copy(
+        id = assignment.workerId,
+        port = assignment.assignedPort
+      )
+      WorkerState.setWorkerInfo(updatedWorkerInfo)
+      WorkerState.setMasterClient(masterClient)
+      
+      val workerServer = new WorkerServer(assignment.assignedPort, conf.outputDir)
+      workerServer.start()
+      println(s"🔌 WorkerServer started on port ${assignment.assignedPort}")
+
+      HeartbeatManager.start(updatedWorkerInfo, masterClient)
+
+      // ---------------------------------------------------------
+      // Sampling
+      // ---------------------------------------------------------
+      val samples = common.Sampling.uniformEveryN(conf.inputPaths, everyN = 1000)
+      println(s"➡️  collected ${samples.size} sample keys")
+
+      // ---------------------------------------------------------
+      // Splitters 수신
+      // ---------------------------------------------------------
+      val splitters = masterClient.sendSamples(samples)
+      println(s"➡️  received ${splitters.key.size} splitters from Master")
+
+      // ---------------------------------------------------------
+      // Helper functions
+      // ---------------------------------------------------------
+      def extractKey(rec: Array[Byte]): Array[Byte] =
+        java.util.Arrays.copyOfRange(rec, 0, RecordIO.KeySize)
+
+      def readAll(path: String): Vector[Array[Byte]] = {
+        val file = new java.io.File(path)
+        val files = if (file.isDirectory) {
+          file.listFiles().filter(_.isFile).toSeq
+        } else {
+          Seq(file)
         }
-        buf
-      }.toVector
-    }
-
-    // ---------------------------------------------------------
-    // Load and Sort
-    // ---------------------------------------------------------
-    val allRecords: Vector[Array[Byte]] =
-      conf.inputPaths.flatMap(path => readAll(path)).toVector
-
-    println(s"📦 Loaded total ${allRecords.size} records")
-
-    val sorted = allRecords.sortWith { (a, b) =>
-      RecordIO.compareKeys(extractKey(a), extractKey(b)) < 0
-    }
-    println("🔑 Local sorting completed")
-
-    // ---------------------------------------------------------
-    // Partitioning
-    // ---------------------------------------------------------
-    val splitterKeys: Array[Array[Byte]] =
-      splitters.key.map(_.toByteArray).toArray
-
-    def findPartition(key: Array[Byte]): Int = {
-      var idx = 0
-      while (idx < splitterKeys.length &&
-              RecordIO.compareKeys(splitterKeys(idx), key) < 0) {
-        idx += 1
-      }
-      idx
-    }
-
-    val partitioned =
-      sorted.groupBy(rec => findPartition(extractKey(rec)))
-
-    println(s"🧩 Partitioning complete → partitions=${partitioned.size}")
-
-    // ---------------------------------------------------------
-    // Wait for PartitionPlan
-    // ---------------------------------------------------------
-    println("⏳ Waiting for PartitionPlan with worker addresses...")
-    
-    // WorkerServer의 PlanStore에서 Plan을 받을 때까지 대기
-    var workerAddresses: Map[Int, (String, Int)] = Map.empty
-    val planDeadline = System.nanoTime() + 60_000_000_000L // 60초 대기
-    
-    while (workerAddresses.isEmpty && System.nanoTime() < planDeadline) {
-      Thread.sleep(100)
-      // WorkerServer에서 저장한 Plan 확인
-      WorkerState.getWorkerAddresses match {
-        case Some(addrs) if addrs.nonEmpty =>
-          workerAddresses = addrs
-          println(s"📋 Received worker addresses: ${addrs.map { case (id, (ip, port)) => s"$id->$ip:$port" }.mkString(", ")}")
-        case _ =>
-          // 아직 Plan 미수신
-      }
-    }
-    
-    if (workerAddresses.isEmpty) {
-      throw new RuntimeException("Timeout waiting for PartitionPlan with worker addresses")
-    }
-
-    // ---------------------------------------------------------
-    // Shuffle
-    // ---------------------------------------------------------
-      def sendPartitionWithRetry(
-        originalTarget: Int,
-        partitionId: Int,
-        records: Seq[Array[Byte]],
-        workerAddresses: Map[Int, (String, Int)],
-        maxRetries: Int = 3
-      ): Unit = {
         
-        var attempt = 0
-        
-        while (attempt < maxRetries) {              
-          try {
-            val (targetIp, targetPort) = workerAddresses(originalTarget)
-            println(s"  Attempt ${attempt+1}/$maxRetries: p$partitionId → worker#$originalTarget ($targetIp:$targetPort)")
-            
-            val channel = ManagedChannelBuilder
-              .forAddress(targetIp, targetPort)
-              .usePlaintext()
-              .build()
-            
-            val stub = WorkerServiceGrpc.stub(channel)
-            val ackPromise = scala.concurrent.Promise[Unit]()
-            
-            val responseObserver = new StreamObserver[Ack] {
-              override def onNext(v: Ack): Unit =
-                println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
+        files.flatMap { f =>
+          val buf = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+          RecordIO.streamRecords(f.getPath) { (key, value) =>
+            val rec = new Array[Byte](RecordIO.RecordSize)
+            System.arraycopy(key, 0, rec, 0, RecordIO.KeySize)
+            System.arraycopy(value, 0, rec, RecordIO.KeySize, RecordIO.RecordSize - RecordIO.KeySize)
+            buf += rec
+          }
+          buf
+        }.toVector
+      }
+
+      // ---------------------------------------------------------
+      // Load and Sort
+      // ---------------------------------------------------------
+      val allRecords: Vector[Array[Byte]] =
+        conf.inputPaths.flatMap(path => readAll(path)).toVector
+
+      println(s"📦 Loaded total ${allRecords.size} records")
+
+      val sorted = allRecords.sortWith { (a, b) =>
+        RecordIO.compareKeys(extractKey(a), extractKey(b)) < 0
+      }
+      println("🔑 Local sorting completed")
+
+      // ---------------------------------------------------------
+      // Partitioning
+      // ---------------------------------------------------------
+      val splitterKeys: Array[Array[Byte]] =
+        splitters.key.map(_.toByteArray).toArray
+
+      def findPartition(key: Array[Byte]): Int = {
+        var idx = 0
+        while (idx < splitterKeys.length &&
+                RecordIO.compareKeys(splitterKeys(idx), key) < 0) {
+          idx += 1
+        }
+        idx
+      }
+
+      val partitioned =
+        sorted.groupBy(rec => findPartition(extractKey(rec)))
+
+      println(s"🧩 Partitioning complete → partitions=${partitioned.size}")
+
+      // ---------------------------------------------------------
+      // Wait for PartitionPlan
+      // ---------------------------------------------------------
+      println("⏳ Waiting for PartitionPlan with worker addresses...")
+      
+      // WorkerServer의 PlanStore에서 Plan을 받을 때까지 대기
+      var workerAddresses: Map[Int, (String, Int)] = Map.empty
+      val planDeadline = System.nanoTime() + 60_000_000_000L // 60초 대기
+      
+      while (workerAddresses.isEmpty && System.nanoTime() < planDeadline) {
+        Thread.sleep(100)
+        // WorkerServer에서 저장한 Plan 확인
+        WorkerState.getWorkerAddresses match {
+          case Some(addrs) if addrs.nonEmpty =>
+            workerAddresses = addrs
+            println(s"📋 Received worker addresses: ${addrs.map { case (id, (ip, port)) => s"$id->$ip:$port" }.mkString(", ")}")
+          case _ =>
+            // 아직 Plan 미수신
+        }
+      }
+      
+      if (workerAddresses.isEmpty) {
+        throw new RuntimeException("Timeout waiting for PartitionPlan with worker addresses")
+      }
+
+      // ---------------------------------------------------------
+      // Shuffle
+      // ---------------------------------------------------------
+        def sendPartitionWithRetry(
+          originalTarget: Int,
+          partitionId: Int,
+          records: Seq[Array[Byte]],
+          workerAddresses: Map[Int, (String, Int)],
+          maxRetries: Int = 3
+        ): Unit = {
+          
+          var attempt = 0
+          
+          while (attempt < maxRetries) {              
+            try {
+              val (targetIp, targetPort) = workerAddresses(originalTarget)
+              println(s"  Attempt ${attempt+1}/$maxRetries: p$partitionId → worker#$originalTarget ($targetIp:$targetPort)")
               
-              override def onError(t: Throwable): Unit = {
-                println(s"    ✗ Error: ${t.getMessage}")
-                ackPromise.failure(t)
+              val channel = ManagedChannelBuilder
+                .forAddress(targetIp, targetPort)
+                .usePlaintext()
+                .build()
+              
+              val stub = WorkerServiceGrpc.stub(channel)
+              val ackPromise = scala.concurrent.Promise[Unit]()
+              
+              val responseObserver = new StreamObserver[Ack] {
+                override def onNext(v: Ack): Unit =
+                  println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
+                
+                override def onError(t: Throwable): Unit = {
+                  println(s"    ✗ Error: ${t.getMessage}")
+                  ackPromise.failure(t)
+                }
+                
+                override def onCompleted(): Unit = {
+                  println(s"    ✓ Completed p$partitionId")
+                  ackPromise.success(())
+                }
               }
               
-              override def onCompleted(): Unit = {
-                println(s"    ✓ Completed p$partitionId")
-                ackPromise.success(())
+              val requestObserver = stub.pushPartition(responseObserver)
+              
+              var seq: Long = 0
+              records.foreach { rec =>
+                val chunk = PartitionChunk(
+                  task = Some(TaskId("task-001")),
+                  partitionId = s"p$partitionId",
+                  senderId = WorkerState.getWorkerId,
+                  payload = ByteString.copyFrom(rec),
+                  seq = seq
+                )
+                seq += 1
+                requestObserver.onNext(chunk)
               }
+              
+              requestObserver.onCompleted()
+              Await.result(ackPromise.future, 30.seconds)
+              channel.shutdown()
+              
+              println(s"  ✅ p$partitionId sent successfully")
+              return  // 성공! 함수 종료
+              
+            } catch {
+              case e: Exception =>
+                attempt += 1
+                
+                if (attempt < maxRetries) {
+                  val backoff = 2000 * attempt  // 2s, 4s, 6s
+                  println(s"  ⚠️ Send failed, retry after ${backoff}ms: ${e.getMessage}")
+                  Thread.sleep(backoff)
+                } else {
+                  Console.err.println(s"  ❌ Failed to send p$partitionId after $maxRetries attempts")
+                  throw new RuntimeException(s"Failed after $maxRetries attempts", e)
+                }
             }
-            
-            val requestObserver = stub.pushPartition(responseObserver)
-            
-            var seq: Long = 0
-            records.foreach { rec =>
-              val chunk = PartitionChunk(
-                task = Some(TaskId("task-001")),
-                partitionId = s"p$partitionId",
-                senderId = WorkerState.getWorkerId,
-                payload = ByteString.copyFrom(rec),
-                seq = seq
-              )
-              seq += 1
-              requestObserver.onNext(chunk)
-            }
-            
-            requestObserver.onCompleted()
-            Await.result(ackPromise.future, 30.seconds)
-            channel.shutdown()
-            
-            println(s"  ✅ p$partitionId sent successfully")
-            return  // 성공! 함수 종료
-            
-          } catch {
-            case e: Exception =>
-              attempt += 1
-              
-              if (attempt < maxRetries) {
-                val backoff = 2000 * attempt  // 2s, 4s, 6s
-                println(s"  ⚠️ Send failed, retry after ${backoff}ms: ${e.getMessage}")
-                Thread.sleep(backoff)
-              } else {
-                Console.err.println(s"  ❌ Failed to send p$partitionId after $maxRetries attempts")
-                throw new RuntimeException(s"Failed after $maxRetries attempts", e)
-              }
           }
         }
-      }
 
-    println("-------------------------------------------------------")
-    println("     🚚 Starting Shuffle: worker → worker")
-    println("-------------------------------------------------------")
-
-    try {
-      for ((pid, recs) <- partitioned) {
-        val targetWorker = pid % workerAddresses.size
-        checkpointSentPartition(pid, recs, conf.outputDir)
-        sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
-      }
-    } catch {
-      case e: Exception =>
-        Console.err.println(s"❌ Shuffle failed: ${e.getMessage}")
-        Console.err.println("Note: Sender failure recovery not yet implemented")
-        throw e
-    }
-
-    println("-------------------------------------------------------")
-    println("       🎉 Shuffle Completed")
-    println("-------------------------------------------------------")
-    
-    println("Shuffle completed, reporting to Master...")
-
-    val sendRecords = partitioned.map { case (pid, _) =>
-      val target = pid % workerAddresses.size
-      PartitionSendRecord(
-        partitionId = pid,
-        targetWorkerId = target,
-        senderId = WorkerState.getWorkerId,
-        success = true
-      )
-    }.toSeq
-
-    val report = ShuffleCompletionReport(
-      workerId = WorkerState.getWorkerId,
-      sendRecords = sendRecords
-    )
-    WorkerState.setShuffleReport(report)
-    WorkerState.reportShuffleComplete()
-
-    println("Shuffle report sent to Master")
-    println("⏳ Waiting for finalize command from Master...")
-
-    WorkerState.awaitFinalizeComplete()
-
-    HeartbeatManager.stop()
-    masterClient.shutdown()
-    println("✅ Worker completed successfully")    
-  } catch {
-    case e: Exception =>
-      Console.err.println(s"❌ Worker error: ${e.getMessage}")
-      e.printStackTrace()
-      HeartbeatManager.stop()
+      println("-------------------------------------------------------")
+      println("     🚚 Starting Shuffle: worker → worker")
+      println("-------------------------------------------------------")
 
       try {
-        WorkerState.getMasterClient.shutdown()
+        for ((pid, recs) <- partitioned) {
+          val targetWorker = pid % workerAddresses.size
+          checkpointSentPartition(pid, recs, conf.outputDir)
+          sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
+        }
       } catch {
-        case _: Exception => // Ignore
+        case e: Exception =>
+          Console.err.println(s"❌ Shuffle failed: ${e.getMessage}")
+          Console.err.println("Note: Sender failure recovery not yet implemented")
+          throw e
       }
 
-      System.exit(1)
+      println("-------------------------------------------------------")
+      println("       🎉 Shuffle Completed")
+      println("-------------------------------------------------------")
+      
+      println("Shuffle completed, reporting to Master...")
+
+      val sendRecords = partitioned.map { case (pid, _) =>
+        val target = pid % workerAddresses.size
+        PartitionSendRecord(
+          partitionId = pid,
+          targetWorkerId = target,
+          senderId = WorkerState.getWorkerId,
+          success = true
+        )
+      }.toSeq
+
+      val report = ShuffleCompletionReport(
+        workerId = WorkerState.getWorkerId,
+        sendRecords = sendRecords
+      )
+      WorkerState.setShuffleReport(report)
+      WorkerState.reportShuffleComplete()
+
+      println("Shuffle report sent to Master")
+      println("⏳ Waiting for finalize command from Master...")
+
+      WorkerState.awaitFinalizeComplete()
+
+      HeartbeatManager.stop()
+      masterClient.shutdown()
+      println("✅ Worker completed successfully")    
+    } catch {
+      case e: Exception =>
+        Console.err.println(s"❌ Worker error: ${e.getMessage}")
+        e.printStackTrace()
+        HeartbeatManager.stop()
+
+        try {
+          WorkerState.getMasterClient.shutdown()
+        } catch {
+          case _: Exception => // Ignore
+        }
+
+        System.exit(1)
+    }
   }
 
   /** Local IPv4 검색 */
