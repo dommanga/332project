@@ -359,6 +359,16 @@ class MasterServiceImpl(
   override def reportMergeComplete(status: WorkerStatus): Future[Ack] = Future {
     println(s"[Master] Worker ${status.workerId} reported merge complete")
     ShuffleTracker.markMergeComplete(status.workerId)
+
+    if (ShuffleTracker.isAllMergeComplete) {
+      println("[Master] 🎉 All work complete! Shutting down in 3 seconds...")
+      Future {
+        Thread.sleep(3000)  // Worker들의 마지막 응답 전송 대기
+        println("[Master] Goodbye!")
+        System.exit(0)
+      }
+    }
+
     Ack(ok = true, msg = "Merge completion noted")
   }
 
