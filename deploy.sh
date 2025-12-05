@@ -84,14 +84,18 @@ start_workers() {
   echo "=== Starting workers ==="
   for host in "${WORKERS[@]}"; do
     echo "→ Starting worker on $host"
-    ssh $host "cd $PROJECT_DIR && sbt \
-      -J-Xms2G \
-      -J-Xmx4G \
-      -J-XX:+UseG1GC \
-      -J-XX:MaxGCPauseMillis=200 \
-      'runMain worker.WorkerClient $MASTER_IP:$MASTER_PORT -I $DATA_INPUT -O $DATA_OUTPUT'" &
+    ssh $host "cd $PROJECT_DIR && nohup sbt -J-Xms2G -J-Xmx4G -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 'runMain worker.WorkerClient $MASTER_IP:$MASTER_PORT -I $DATA_INPUT -O $DATA_OUTPUT' > /tmp/worker.log 2>&1 &"
   done
   echo "✅ Workers started (running in background)"
+  
+  # 2초 대기 후 확인
+  sleep 2
+  echo ""
+  echo "=== Checking worker processes ==="
+  for host in "${WORKERS[@]}"; do
+    echo "→ $host:"
+    ssh $host "ps aux | grep 'WorkerClient' | grep -v grep || echo '  ⚠️  Not running'"
+  done
 }
 
 # 7. 전체 초기화 (데이터 + 출력)
