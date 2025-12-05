@@ -152,7 +152,7 @@ cd ~/332project
 On the Master server (vm-1-master):
 
 ```bash
-sbt "runMain master.MasterServer 3"
+sbt -J-Xms1G -J-Xmx2G 'runMain master.MasterServer 3'
 ```
 
 Expected output:
