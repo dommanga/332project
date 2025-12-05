@@ -92,7 +92,6 @@ start_workers() {
 # 7. 전체 초기화 (데이터 + 출력)
 reset_all() {
   clean_output
-  generate_data
 }
 
 # ============================================

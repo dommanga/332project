@@ -1,7 +1,7 @@
 package worker
 
 import rpc.sort._
-import scala.concurrent.{Await, ExecutionContext}
+import scala.concurrent.{Future, Await, ExecutionContext}
 import scala.concurrent.duration._
 import io.grpc.ManagedChannelBuilder
 import io.grpc.stub.StreamObserver
@@ -49,6 +49,108 @@ object WorkerClient {
         println("💓 Heartbeat stopped")
       }
     }
+  }
+
+  /**
+  * 병렬 정렬: 데이터를 numThreads개로 나눠서 병렬 정렬 후 K-way merge
+  */
+  private def parallelSort(
+    records: Vector[Array[Byte]], 
+    numThreads: Int = 4
+  )(implicit ec: ExecutionContext): Vector[Array[Byte]] = {
+    
+    if (records.isEmpty) return Vector.empty
+    
+    println(s"🔧 Parallel sorting with $numThreads threads...")
+    
+    // Step 1: 데이터를 numThreads개 chunk로 분할
+    val chunkSize = (records.size + numThreads - 1) / numThreads
+    val chunks = records.grouped(chunkSize).toVector
+    println(s"   Split into ${chunks.size} chunks (avg ${chunkSize} records/chunk)")
+    
+    // Step 2: 각 chunk를 병렬로 정렬
+    val sortedChunksFutures = chunks.zipWithIndex.map { case (chunk, idx) =>
+      Future {
+        println(s"   Thread $idx: sorting ${chunk.size} records...")
+        val sorted = chunk.sortWith { (a, b) =>
+          RecordIO.compareKeys(extractKey(a), extractKey(b)) < 0
+        }
+        println(s"   Thread $idx: done")
+        sorted
+      }
+    }
+    
+    val sortedChunks = Await.result(Future.sequence(sortedChunksFutures), Duration.Inf)
+    println(s"   All chunks sorted, starting merge...")
+    
+    // Step 3: K-way merge
+    val merged = kWayMerge(sortedChunks.toList)
+    println(s"   Merge complete!")
+    
+    merged
+  }
+
+  /**
+  * K-way merge for sorted chunks
+  */
+  private def kWayMerge(chunks: List[Vector[Array[Byte]]]): Vector[Array[Byte]] = {
+    case class ChunkIter(var current: Array[Byte], it: Iterator[Array[Byte]], chunkId: Int)
+    
+    // Min-heap (Scala의 PriorityQueue는 max-heap이라 반전)
+    implicit val chunkOrdering: Ordering[ChunkIter] =
+      Ordering.fromLessThan[ChunkIter] { (x, y) =>
+        RecordIO.compareKeys(extractKey(x.current), extractKey(y.current)) > 0
+      }
+    
+    val pq = scala.collection.mutable.PriorityQueue.empty[ChunkIter]
+    
+    // 각 chunk의 첫 요소를 PQ에 넣기
+    chunks.zipWithIndex.foreach { case (chunk, idx) =>
+      val it = chunk.iterator
+      if (it.hasNext) {
+        pq.enqueue(ChunkIter(it.next(), it, idx))
+      }
+    }
+    
+    val result = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+    
+    while (pq.nonEmpty) {
+      val smallest = pq.dequeue()
+      result += smallest.current
+      
+      if (smallest.it.hasNext) {
+        smallest.current = smallest.it.next()
+        pq.enqueue(smallest)
+      }
+    }
+    
+    result.toVector
+  }
+
+  /**
+  * Extract key from 100-byte record
+  */
+  private def extractKey(rec: Array[Byte]): Array[Byte] =
+    java.util.Arrays.copyOfRange(rec, 0, RecordIO.KeySize)
+
+  private def readAll(path: String): Vector[Array[Byte]] = {
+    val file = new java.io.File(path)
+    val files = if (file.isDirectory) {
+      file.listFiles().filter(_.isFile).toSeq
+    } else {
+      Seq(file)
+    }
+    
+    files.flatMap { f =>
+      val buf = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+      RecordIO.streamRecords(f.getPath) { (key, value) =>
+        val rec = new Array[Byte](RecordIO.RecordSize)
+        System.arraycopy(key, 0, rec, 0, RecordIO.KeySize)
+        System.arraycopy(value, 0, rec, RecordIO.KeySize, RecordIO.RecordSize - RecordIO.KeySize)
+        buf += rec
+      }
+      buf
+    }.toVector
   }
 
   // ===== Main Entry Point =====
@@ -114,32 +216,6 @@ object WorkerClient {
       println(s"➡️  received ${splitters.key.size} splitters from Master")
 
       // ---------------------------------------------------------
-      // Helper functions
-      // ---------------------------------------------------------
-      def extractKey(rec: Array[Byte]): Array[Byte] =
-        java.util.Arrays.copyOfRange(rec, 0, RecordIO.KeySize)
-
-      def readAll(path: String): Vector[Array[Byte]] = {
-        val file = new java.io.File(path)
-        val files = if (file.isDirectory) {
-          file.listFiles().filter(_.isFile).toSeq
-        } else {
-          Seq(file)
-        }
-        
-        files.flatMap { f =>
-          val buf = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
-          RecordIO.streamRecords(f.getPath) { (key, value) =>
-            val rec = new Array[Byte](RecordIO.RecordSize)
-            System.arraycopy(key, 0, rec, 0, RecordIO.KeySize)
-            System.arraycopy(value, 0, rec, RecordIO.KeySize, RecordIO.RecordSize - RecordIO.KeySize)
-            buf += rec
-          }
-          buf
-        }.toVector
-      }
-
-      // ---------------------------------------------------------
       // Load and Sort
       // ---------------------------------------------------------
       val allRecords: Vector[Array[Byte]] =
@@ -147,9 +223,9 @@ object WorkerClient {
 
       println(s"📦 Loaded total ${allRecords.size} records")
 
-      val sorted = allRecords.sortWith { (a, b) =>
-        RecordIO.compareKeys(extractKey(a), extractKey(b)) < 0
-      }
+      // Parallel sorting
+      implicit val sortingEc: ExecutionContext = ExecutionContext.global
+      val sorted = parallelSort(allRecords, numThreads = 4)
       println("🔑 Local sorting completed")
 
       // ---------------------------------------------------------
@@ -200,81 +276,81 @@ object WorkerClient {
       // ---------------------------------------------------------
       // Shuffle
       // ---------------------------------------------------------
-        def sendPartitionWithRetry(
-          originalTarget: Int,
-          partitionId: Int,
-          records: Seq[Array[Byte]],
-          workerAddresses: Map[Int, (String, Int)],
-          maxRetries: Int = 3
-        ): Unit = {
-          
-          var attempt = 0
-          
-          while (attempt < maxRetries) {              
-            try {
-              val (targetIp, targetPort) = workerAddresses(originalTarget)
-              println(s"  Attempt ${attempt+1}/$maxRetries: p$partitionId → worker#$originalTarget ($targetIp:$targetPort)")
+      def sendPartitionWithRetry(
+        originalTarget: Int,
+        partitionId: Int,
+        records: Seq[Array[Byte]],
+        workerAddresses: Map[Int, (String, Int)],
+        maxRetries: Int = 3
+      ): Unit = {
+        
+        var attempt = 0
+        
+        while (attempt < maxRetries) {              
+          try {
+            val (targetIp, targetPort) = workerAddresses(originalTarget)
+            println(s"  Attempt ${attempt+1}/$maxRetries: p$partitionId → worker#$originalTarget ($targetIp:$targetPort)")
+            
+            val channel = ManagedChannelBuilder
+              .forAddress(targetIp, targetPort)
+              .usePlaintext()
+              .build()
+            
+            val stub = WorkerServiceGrpc.stub(channel)
+            val ackPromise = scala.concurrent.Promise[Unit]()
+            
+            val responseObserver = new StreamObserver[Ack] {
+              override def onNext(v: Ack): Unit =
+                println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
               
-              val channel = ManagedChannelBuilder
-                .forAddress(targetIp, targetPort)
-                .usePlaintext()
-                .build()
-              
-              val stub = WorkerServiceGrpc.stub(channel)
-              val ackPromise = scala.concurrent.Promise[Unit]()
-              
-              val responseObserver = new StreamObserver[Ack] {
-                override def onNext(v: Ack): Unit =
-                  println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
-                
-                override def onError(t: Throwable): Unit = {
-                  println(s"    ✗ Error: ${t.getMessage}")
-                  ackPromise.failure(t)
-                }
-                
-                override def onCompleted(): Unit = {
-                  println(s"    ✓ Completed p$partitionId")
-                  ackPromise.success(())
-                }
+              override def onError(t: Throwable): Unit = {
+                println(s"    ✗ Error: ${t.getMessage}")
+                ackPromise.failure(t)
               }
               
-              val requestObserver = stub.pushPartition(responseObserver)
-              
-              var seq: Long = 0
-              records.foreach { rec =>
-                val chunk = PartitionChunk(
-                  task = Some(TaskId("task-001")),
-                  partitionId = s"p$partitionId",
-                  senderId = WorkerState.getWorkerId,
-                  payload = ByteString.copyFrom(rec),
-                  seq = seq
-                )
-                seq += 1
-                requestObserver.onNext(chunk)
+              override def onCompleted(): Unit = {
+                println(s"    ✓ Completed p$partitionId")
+                ackPromise.success(())
               }
-              
-              requestObserver.onCompleted()
-              Await.result(ackPromise.future, 30.seconds)
-              channel.shutdown()
-              
-              println(s"  ✅ p$partitionId sent successfully")
-              return  // 성공! 함수 종료
-              
-            } catch {
-              case e: Exception =>
-                attempt += 1
-                
-                if (attempt < maxRetries) {
-                  val backoff = 2000 * attempt  // 2s, 4s, 6s
-                  println(s"  ⚠️ Send failed, retry after ${backoff}ms: ${e.getMessage}")
-                  Thread.sleep(backoff)
-                } else {
-                  Console.err.println(s"  ❌ Failed to send p$partitionId after $maxRetries attempts")
-                  throw new RuntimeException(s"Failed after $maxRetries attempts", e)
-                }
             }
+            
+            val requestObserver = stub.pushPartition(responseObserver)
+            
+            var seq: Long = 0
+            records.foreach { rec =>
+              val chunk = PartitionChunk(
+                task = Some(TaskId("task-001")),
+                partitionId = s"p$partitionId",
+                senderId = WorkerState.getWorkerId,
+                payload = ByteString.copyFrom(rec),
+                seq = seq
+              )
+              seq += 1
+              requestObserver.onNext(chunk)
+            }
+            
+            requestObserver.onCompleted()
+            Await.result(ackPromise.future, 30.seconds)
+            channel.shutdown()
+            
+            println(s"  ✅ p$partitionId sent successfully")
+            return  // 성공! 함수 종료
+            
+          } catch {
+            case e: Exception =>
+              attempt += 1
+              
+              if (attempt < maxRetries) {
+                val backoff = 2000 * attempt  // 2s, 4s, 6s
+                println(s"  ⚠️ Send failed, retry after ${backoff}ms: ${e.getMessage}")
+                Thread.sleep(backoff)
+              } else {
+                Console.err.println(s"  ❌ Failed to send p$partitionId after $maxRetries attempts")
+                throw new RuntimeException(s"Failed after $maxRetries attempts", e)
+              }
           }
         }
+      }
 
       println("-------------------------------------------------------")
       println("     🚚 Starting Shuffle: worker → worker")
