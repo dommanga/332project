@@ -155,6 +155,9 @@ object WorkerClient {
 
   // ===== Main Entry Point =====
   def main(args: Array[String]): Unit = {
+
+    implicit val ec: ExecutionContext = ExecutionContext.global
+
     // Shutdown Hook
     sys.addShutdownHook {
       println("🛑 Shutting down worker...")
@@ -224,7 +227,6 @@ object WorkerClient {
       println(s"📦 Loaded total ${allRecords.size} records")
 
       // Parallel sorting
-      implicit val sortingEc: ExecutionContext = ExecutionContext.global
       val sorted = parallelSort(allRecords, numThreads = 4)
       println("🔑 Local sorting completed")
 
@@ -353,19 +355,30 @@ object WorkerClient {
       }
 
       println("-------------------------------------------------------")
-      println("     🚚 Starting Shuffle: worker → worker")
+      println("     🚚 Starting Shuffle: worker → worker (PARALLEL)")
       println("-------------------------------------------------------")
 
-      try {
-        for ((pid, recs) <- partitioned) {
-          val targetWorker = pid % workerAddresses.size
-          checkpointSentPartition(pid, recs, conf.outputDir)
-          sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
-        }
+      try {      
+        val shuffleFutures = partitioned.map { case (pid, recs) =>
+          Future {
+            val targetWorker = pid % workerAddresses.size
+            
+            checkpointSentPartition(pid, recs, conf.outputDir)
+            
+            // Network 전송 (병렬화)
+            sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
+            
+            println(s"  ✨ Worker thread completed p$pid")
+          }
+        }.toSeq
+        
+        println(s"  🔄 Waiting for ${shuffleFutures.size} parallel transfers...")
+        Await.result(Future.sequence(shuffleFutures), 120.seconds)
+        
       } catch {
         case e: Exception =>
           Console.err.println(s"❌ Shuffle failed: ${e.getMessage}")
-          Console.err.println("Note: Sender failure recovery not yet implemented")
+          e.printStackTrace()
           throw e
       }
 
