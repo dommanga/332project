@@ -286,9 +286,20 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
   /** 현재까지 들어온 모든 partition_id에 대해 finalize */
   def finalizeAll(): Unit = {
-    val pids = PartitionStore.allPartitionIds
-    println(s"[Worker] finalizeAll: partitions=${pids.mkString(", ")}")
-    pids.foreach(finalizePartition)
+    val allRunIds = PartitionStore.allPartitionIds  // ["p2_from_w1", "p2_from_w0", ...]
+    
+    val uniquePartitionIds = allRunIds
+      .map { runId =>
+        // "p2_from_w1" → "p2"
+        runId.split("_from_").headOption.getOrElse(runId)
+      }
+      .toSet
+    
+    println(s"[Worker] finalizeAll: unique partitions=${uniquePartitionIds.mkString(", ")}")
+    
+    uniquePartitionIds.foreach { pid =>
+      finalizePartition(pid)
+    }
   }
 
   /** 최종 merged record들을 outputDir 아래 파일로 저장 */
