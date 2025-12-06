@@ -14,46 +14,26 @@ object WorkerState {
   private val finalizeLatch = new CountDownLatch(1)
 
   /**
-   * PartitionPlan이 없으면 자동으로 재생성
+   * PartitionPlan이 없으면 대기
    */
   private def ensurePartitionPlan(): Unit = {
     if (_partitionPlan.isEmpty) {
-      println("[WorkerState] ⚠️ PartitionPlan missing, reconstructing...")
+      println("[WorkerState] ⚠️ PartitionPlan not received yet, waiting...")
+
+      val deadline = System.nanoTime() + 120_000_000_000L
       
-      _workerAddresses match {
-        case Some(addresses) =>
-          val numWorkers = addresses.size
-          val numPartitions = numWorkers * 4
-          
-          // PartitionPlan 재구성
-          val partitionsPerWorker = (numPartitions + numWorkers - 1) / numWorkers
-          
-          val ranges = (0 until numPartitions).map { pid =>
-            val targetWorker = pid / partitionsPerWorker
-            
-            PartitionRange(
-              lo = com.google.protobuf.ByteString.EMPTY,
-              hi = com.google.protobuf.ByteString.EMPTY,
-              targetWorker = targetWorker
-            )
-          }
-          
-          val workers = addresses.map { case (id, (ip, port)) =>
-            WorkerAddress(workerId = id, ip = ip, port = port)
-          }.toSeq
-          
-          val reconstructedPlan = PartitionPlan(
-            task = Some(TaskId("recovered")),
-            ranges = ranges,
-            workers = workers
-          )
-          
-          _partitionPlan = Some(reconstructedPlan)
-          println(s"[WorkerState] ✅ Reconstructed PartitionPlan: $numPartitions partitions, $numWorkers workers")
-          
-        case None =>
-          throw new RuntimeException("Cannot reconstruct PartitionPlan: no worker addresses!")
+      while (_partitionPlan.isEmpty && System.nanoTime() < deadline) {
+        Thread.sleep(500)
       }
+
+      if (_partitionPlan.isEmpty) {
+        throw new RuntimeException(
+          "Timeout waiting for PartitionPlan from Master! " +
+          "Master may have failed or network issue occurred."
+        )
+      }
+
+      println("[WorkerState] ✅ PartitionPlan received")
     }
   }
 
