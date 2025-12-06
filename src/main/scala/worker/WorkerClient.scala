@@ -468,7 +468,7 @@ object WorkerClient {
       )
       WorkerState.setShuffleReport(report)
 
-      FaultInjector.checkAndCrash("before-finalize-1")
+      FaultInjector.checkAndCrash("before-finalize")
 
       try {
         WorkerState.reportShuffleComplete()
@@ -478,8 +478,6 @@ object WorkerClient {
           Console.err.println(s"⚠️ Failed to report shuffle completion: ${e.getMessage}")
           Console.err.println("⚠️ This is non-fatal - work already completed")
       }
-
-      FaultInjector.checkAndCrash("before-finalize-2")
 
       WorkerState.awaitFinalizeComplete()
 
