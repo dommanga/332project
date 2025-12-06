@@ -199,12 +199,15 @@ object WorkerClient {
           System.exit(1)
           return
       }
-      
+
+      val workerServer = new WorkerServer(0, conf.outputDir)
+      val actualPort = workerServer.start()
+
       val masterAddr = conf.masterAddr.split(":")
       val workerInfo = WorkerInfo(
         id = -1,
         ip = getLocalIP(),
-        port = 0,  // Will be assigned by master
+        port = actualPort,
         inputDirs = conf.inputPaths,
         outputDir = conf.outputDir
       )
@@ -212,17 +215,13 @@ object WorkerClient {
       val masterClient = new MasterClient(masterAddr(0), masterAddr(1).toInt)
 
       val assignment = masterClient.register(workerInfo)
-
-      println(s"Worker ${assignment.workerId} registered")
-      
-      val workerServer = new WorkerServer(0, conf.outputDir)
-      val actualPort = workerServer.start()
-
       val updatedWorkerInfo = workerInfo.copy(
         id = assignment.workerId,
         port = actualPort
       )
 
+      println(s"🚀 Worker ${assignment.workerId} registered")
+      
       WorkerState.setWorkerInfo(updatedWorkerInfo)
       WorkerState.setMasterClient(masterClient)
       
