@@ -213,10 +213,10 @@ object WorkerClient {
       println(s"➡️  collected ${samples.size} sample keys")
 
       // ---------------------------------------------------------
-      // Splitters 수신
+      // Splitters creation
       // ---------------------------------------------------------
-      // val splitters = masterClient.sendSamples(samples)
-      // println(s"➡️  received ${splitters.key.size} splitters from Master")
+      masterClient.sendSamples(samples)
+      println(s"➡️  received ${splitters.key.size} splitters from Master")
 
       // ---------------------------------------------------------
       // Load and Sort
