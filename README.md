@@ -13,30 +13,272 @@ Fault-tolerant distributed sorting system for key/value records across multiple 
 
 ### Requirements
 
-- **Input**: 100-byte records (10-byte key + 90-byte value) distributed across workers
-- **Output**: Sorted records distributed across workers with defined ordering
-- **Architecture**: 1 Master + N Workers
-- **Key Feature**: Must handle worker crashes during execution
+* **Record format**: 100-byte record
 
-### System Flow
+  * 10-byte key
+  * 90-byte value
+* **Architecture**: 1 Master, N Workers
+* **Goal**:
 
-```
-1. Sampling:        Workers → Master (sample data)
-2. Sort/Partition:  Workers sort locally and partition by key ranges
-3. Shuffle:         Workers ↔ Workers (redistribute partitions)
-4. Merge:           Workers merge and write final sorted output
+  * Globally sorted output over all workers
+  * Handles **worker crashes during execution** (mid-shuffle, mid-finalize, etc.)
+
+### High-Level Flow
+
+```text
+1. Sampling
+   - Workers send sampled keys to Master.
+   - Master chooses global splitters.
+
+2. Local Sort & Partition
+   - Each worker loads its local input.
+   - Parallel local sort using multiple threads.
+   - Partition into key ranges according to splitters.
+
+3. Shuffle
+   - Workers send partitions to target workers using gRPC streaming.
+   - Sender-side checkpoint for sent partitions.
+
+4. Final Merge & Output
+   - Each worker merges received partitions.
+   - Writes out final sorted partitions.
+   - Reports completion to Master.
 ```
 
 ---
 
-## Quick Start
+## Fault Tolerance Design
+
+### Worker Failure Model
+
+Scenario from spec:
+
+> A worker process crashes in the middle of execution.
+> A new worker starts on the same node (using the same parameters).
+> The new worker should generate the same output expected of the initial worker.
+
+Our implementation supports:
+
+* Crash **after-sampling**, **after-sort**, **after-partition**, **mid-shuffle**, **before-finalize**.
+* Restarted worker uses the **same worker ID** and (logically) the same role in the system.
+
+### Components
+
+#### 1. Heartbeat + Worker Registry (Master)
+
+* Master tracks each worker in `WorkerRegistry`:
+
+  * `WorkerPhase = ALIVE | DEAD`
+  * Keyed by worker **IP** (`2.2.2.xxx`).
+  * Each worker gets a **stable ID** (`0 .. N-1`) when first registered.
+
+* Background thread on Master:
+
+  ```scala
+  registry.pruneDeadWorkers(timeoutSeconds = 5) { deadId =>
+    handleWorkerFailure(deadId)
+  }
+  ```
+
+* If a worker misses heartbeats for more than `timeoutSeconds`:
+
+  * Marked as **DEAD**.
+  * All partitions owned by that worker are marked **orphaned**.
+  * Master prints:
+
+    ```text
+    💀 Worker 1 DEAD (no heartbeat for 7s)
+    ⚠️  Worker 1 failed - partitions Set(5, 6, 7, 4) orphaned
+    ℹ️  Please restart Worker 1 to recover
+    ```
+
+#### 2. Worker Re-Join (Same Node, Same ID)
+
+* When a new worker process starts **on the same node** with the same `worker.WorkerClient` command:
+
+  * Worker calls `registerWorker` with its IP and the same port as before (via local port state).
+  * `WorkerRegistry.register`:
+
+    * If there is a dead worker with the same IP:
+
+      * Reuses the **same worker ID**.
+      * Marks phase = `ALIVE`.
+      * Prints:
+
+        ```text
+        🔄 Worker 2.2.2.118 rejoining with ID 1
+        🎉 Worker 1 rejoined!
+        ```
+
+* Master updates `partitionOwners` for orphaned partitions to point to the rejoined worker.
+
+#### 3. Partition Plan & Re-broadcast
+
+* Master caches the latest `PartitionPlan` in `PlanStore`.
+
+* On sampling completion, Master:
+
+  * Computes splitters.
+  * Creates `PartitionPlan` with worker addresses.
+  * Broadcasts:
+
+    ```text
+    📋 Broadcasting PartitionPlan to workers...
+    ✅ Shuffle phase started
+    ```
+
+* When a worker re-joins:
+
+  * Master reassigns orphaned partitions.
+  * Sends the same logical PartitionPlan only to the rejoined worker, because all other workers already have the correct plan:
+
+    ```text
+    ✅ Resent PartitionPlan to Worker 1
+    ```
+
+#### 4. Sender-Side Checkpoint (Worker)
+
+* Each worker, during shuffle, **checkpoints the data it sends**:
+
+  * For each partition `pid`, before sending:
+
+    ```scala
+    checkpointSentPartition(pid, recs, outputDir)
+    ```
+
+  * Stored under:
+
+    ```text
+    <outputDir>/sent-checkpoint/sent_p<PID>.dat
+    ```
+
+* On restart, worker checks:
+
+  ```scala
+  hasSentCheckpoints(outputDir)
+  ```
+
+  * If `true` → **recovery mode**:
+
+    * Skip sampling / local sort / partition / shuffle.
+    * Wait for finalize command from Master.
+    * Reconstruct missing partitions using checkpoint & other workers.
+
+#### 5. Recovery Mode (Worker)
+
+On restart (same VM, same CLI args):
+
+1. Worker starts `WorkerServer` (with port persistence).
+
+2. Registers with Master → gets same worker ID.
+
+3. Detects existing `sent-checkpoint` → prints:
+
+   ```text
+   🔄 Recovery mode: waiting for finalize...
+   ```
+
+4. After Master sees all shuffles complete (including rejoined worker), it calls `finalizePartitions` on all workers.
+
+5. Worker:
+
+   * Checks which partitions are missing.
+   * Requests those partitions from available workers.
+   * Prints logs like:
+
+     ```text
+     ⚠️  p4 missing from workers: Set(0, 1)
+     🔄 Requesting p4 from w0...
+     ✅ Received p4 from w0: 77178 records
+     ```
+
+6. Writes final partitions:
+
+   ```text
+   🔧 Finalizing 4 partitions...
+   ✅ Wrote partition.4
+   ✅ Wrote partition.5
+   ✅ Wrote partition.6
+   ✅ Wrote partition.7
+   ```
+
+7. Reports merge completion to Master → normal shutdown.
+
+---
+
+## Implementation Notes
+
+### Master CLI
+
+```bash
+sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G \
+  "runMain master.MasterServer <num_workers>"
+```
+
+* Master binds to port `0` (OS chooses a free port).
+
+* On startup it prints:
+
+  ```text
+  <MASTER_IP>:<PORT>
+  <ordering of IP addresses of workers>
+  📋 Broadcasting PartitionPlan to workers...
+  ```
+
+* You must pass this `<MASTER_IP>:<PORT>` to the workers.
+
+### Worker CLI
+
+```bash
+# Basic
+sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
+    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
+    "runMain worker.WorkerClient <master_ip:port> -I <input_dir> -O <output_dir>"
+```
+
+* Worker:
+
+  * Starts its own gRPC server on a dynamically chosen port.
+  * Registers itself at Master with its IP + port.
+  * Runs sampling → local sort → partition → shuffle → finalize.
+
+### Fault Injection
+
+We use env vars for deterministic failure testing:
+
+* `FAULT_INJECT_PHASE` (comma-separated phases):
+
+  * `after-sampling`
+  * `after-sort`
+  * `after-partition`
+  * `mid-shuffle`
+  * `before-finalize`
+
+* `FAULT_INJECT_WORKER`:
+
+  * `n` = apply only to worker with ID `n`
+
+Example (crash worker 1 mid-shuffle):
+
+```bash
+FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=1 \
+  sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
+      -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
+      "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/out"
+```
+
+Then restart the same command **without** fault injection to recover.
+
+---
+
+## Quick Start (Local)
 
 ### Prerequisites
 
-- Java 8+
-- Scala 2.13
-- SBT 1.x
-- gensort (for test data generation)
+* Java 8+
+* Scala 2.13
+* SBT 1.x
+* (Optional) `gensort` + `valsort` for synthetic data
 
 ### Build
 
@@ -44,444 +286,225 @@ Fault-tolerant distributed sorting system for key/value records across multiple 
 sbt compile
 ```
 
----
-
-## Testing Guide
-
-### 1. Generate Test Data
-
-First, generate test data using gensort:
+### Generate Local Test Data (Optional)
 
 ```bash
-# Download gensort (one-time setup)
 wget http://www.ordinal.com/try.cgi/gensort-linux-1.5.tar.gz
 tar -xzf gensort-linux-1.5.tar.gz
 
-# Generate test data (100K records = 10MB)
 mkdir -p data/input1 data/input2 data/input3
-./gensort -a -b0 100000 data/input1/data
+
+./gensort -a -b0      100000 data/input1/data
 ./gensort -a -b100000 100000 data/input2/data
 ./gensort -a -b200000 100000 data/input3/data
-
-# Or use smaller data for quick testing (10K records = 1MB)
-./gensort -a -b0 10000 data/input1/data
-./gensort -a -b10000 10000 data/input2/data
-./gensort -a -b20000 10000 data/input3/data
 ```
-
-### 2. Local Testing (localhost)
-
-Open 4 terminals and run in order:
-
-**Terminal 1 - Master:**
-
-```bash
-sbt "runMain master.MasterServer 3"
-```
-
-Expected output:
-
-```
-Master Server Started
-Address: 127.0.0.1:5000
-Expected Workers: 3
-```
-
-**Terminal 2 - Worker 1:**
-
-```bash
-sbt "runMain worker.WorkerClient 127.0.0.1:5000 -I data/input1 -O out1"
-```
-
-**Terminal 3 - Worker 2:**
-
-```bash
-sbt "runMain worker.WorkerClient 127.0.0.1:5000 -I data/input2 -O out2"
-```
-
-**Terminal 4 - Worker 3:**
-
-```bash
-sbt "runMain worker.WorkerClient 127.0.0.1:5000 -I data/input3 -O out3"
-```
-
-**Verify results:**
-
-```bash
-ls out1/  # partition.0, partition.1, partition.2
-ls out2/
-ls out3/
-
-# Validate sorting with valsort
-./valsort out1/partition.0
-./valsort out2/partition.1
-./valsort out3/partition.2
-```
-
-### 3. Cluster Testing
-
-#### Environment Information
-
-- **Master**: 2.2.2.254 (or 141.223.16.227)
-- **Workers**: 2.2.2.101 ~ 2.2.2.120 (vm01 ~ vm20)
-
-#### Execution Steps
-
-**Step 1: Deploy Code and generate data**
-
-Deploy project code to all VMs (via git clone or scp):
-
-```bash
-# On each VM
-git pull origin main
-sbt compile
-
-# vm01
-cd ~/332project
-./gensort -a -b0 100000 ~/data/input/data
-
-# vm02
-./gensort -a -b100000 100000 ~/data/input/data
-
-# vm03
-./gensort -a -b200000 100000 ~/data/input/data
-```
-
-**Step 2: Start Master**
-
-On the Master server (vm-1-master):
-
-```bash
-sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G 'runMain master.MasterServer 2'
-```
-
-Expected output:
-
-```
-Master Server Started
-Address: 2.2.2.254:5000
-Expected Workers: 3
-```
-
-**Step 3: Start Workers**
-
-On each Worker VM (via ssh):
-
-```bash
-# vm01 (2.2.2.101)
-sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/out"
-
-FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=1 sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 'runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/out'
-
-sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 'runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/out'
-
-# vm02 (2.2.2.102)
-sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/out"
-
-# vm03 (2.2.2.103)
-sbt "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/data/out"
-```
-
-**Step 4: Verify Results**
-
-Check output directory on each Worker:
-
-```bash
-ls ~/data/out/
-# partition.0, partition.1, partition.2, ...
-```
-
-#### Cluster Testing Checklist
-
-- [ ] Master logs show all Worker IPs registered correctly (2.2.2.101, etc.)
-- [ ] PartitionPlan broadcasts with Worker addresses included
-- [ ] Worker-to-Worker Shuffle uses actual IPs
-- [ ] Partition files created on each Worker
-- [ ] valsort validation passes
 
 ---
 
-## Deployment Script
+## Cluster Testing
 
-For easier cluster deployment and management, use the deploy.sh script.
+### Environment
 
-### Setup
+* **Master**: `vm-1-master` (e.g., `2.2.2.254`)
+* **Workers**: `vm01` ~ `vm20` (e.g., `2.2.2.101` ~ `2.2.2.120`)
+* **Dataset**: Provided under `/dataset`
+
+### 1. Deploy / Update Code
+
+On each worker VM:
 
 ```bash
+cd ~/332project
+git pull origin main
+sbt compile
+```
 
-chmod +x deploy.sh
+### 2. Start Master
 
+On `vm-1-master`:
+
+```bash
+cd ~/332project
+sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G \
+  "runMain master.MasterServer 3"
+```
+
+Example output:
+
+```text
+2.2.2.254:38278
+2.2.2.117, 2.2.2.118 2.2.2.119
+📋 Broadcasting PartitionPlan to workers...
+✅ Shuffle phase started
+```
+
+Use the printed `2.2.2.254:38278` as `<master_ip:port>` for workers.
+
+### 3. Start Workers
+
+On two worker VMs (e.g., `vm17`, `vm18`, `vm19`):
+
+```bash
+# Worker 0
+sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
+    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
+    "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/out"
+
+# Worker 1
+sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
+    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
+    "runMain worker.WorkerClient 2.2.2.254:38278 -I /dataset/small -O /home/orange/out"
+
+# Worker 2 (with fault injection example)
+FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 \
+sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
+    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
+    "runMain worker.WorkerClient 2.2.2.254:38278 -I /dataset/small -O /home/orange/out"
+```
+
+After the crash, restart Worker 2 without fault injection:
+
+```bash
+sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
+    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
+    "runMain worker.WorkerClient 2.2.2.254:38278 -I /dataset/small -O /home/orange/out"
+```
+
+You should see:
+
+* On Master:
+
+  ```text
+  💀 Worker 2 DEAD (no heartbeat for 7s)
+  ⚠️  Worker 2 failed - partitions Set(8, 9, 11, 10) orphaned
+  ℹ️  Please restart Worker 2 to recover
+  🔄 Worker 2.2.2.119 rejoining with ID 2
+  🎉 Worker 2 rejoined!
+  📦 Assigning recovery partitions: Set(8, 9, 11, 10)
+  ✅ Resent PartitionPlan to Worker 2
+  ...
+  🎉 Distributed sorting complete!
+  ```
+
+* On restarted Worker:
+
+  ```text
+  🔄 Recovery mode: waiting for finalize...
+  🔧 Starting finalize phase...
+  ...
+  ✅ Worker work completed
+  💀 Worker shutting down...
+  ```
+
+---
+
+## `deploy.sh` (Cluster Helper Script) - Not yet revised
+
+We provide a helper script for common cluster tasks.
+
+### Key Configuration (inside `deploy.sh`)
+
+```bash
+PROJECT_DIR="/home/orange/332project"
+
+DATASET="small"
+DATA_INPUT="/dataset/${DATASET}"
+DATA_OUTPUT="/home/orange/out"
+
+MASTER_IP="2.2.2.254"
+# MASTER_PORT="5100"   # Use the port printed by the Master
+RECORDS_PER_WORKER=100000
+
+DEFAULT_NUM_WORKERS=3
 ```
 
 ### Commands
 
-| Command | Description |
-
-|---------|-------------|
-
-| init | Initial setup (git clone, create directories) |
-
-| update | Git pull && sbt compile on all workers |
-
-| gensort | Deploy gensort binary to workers |
-
-| gendata | Generate test data on workers |
-
-| clean | Clean output directories |
-
-| reset | Clean output + generate new data |
-
-| start | Start all workers |
-
-| all | Full deployment (update + reset) |
-
-### Usage Examples
-
-```bash
-
-# First time setup
-
-./deploy.sh init
-
-./deploy.sh gensort
-
-# Development workflow
-
-./deploy.sh update      # After code changes
-
-./deploy.sh reset       # Reset data
-
-./deploy.sh start       # Start workers
-
-# Use specific number of workers
-
-./deploy.sh gendata 5   # Generate data for 5 workers
-
-./deploy.sh start 5     # Start 5 workers
-
-# Full test with 10 workers
-
-./deploy.sh all 10
-
-```
+|   Command | Description                                      |
+| --------: | ------------------------------------------------ |
+|    `init` | Initial setup on workers (git clone, mkdirs)     |
+|  `update` | `git pull` + `sbt compile` on all workers        |
+| `gensort` | (If used) distribute gensort binary              |
+| `gendata` | Generate test data on workers (if using gensort) |
+|   `clean` | Clean output directories                         |
+|   `reset` | Clean output + (optionally) generate data        |
+|   `start` | Start all workers with configured MASTER_IP/PORT |
+|     `all` | `update` + `reset`                               |
 
 ### Typical Workflow
 
-1. **Initial Setup (once)**
-
-   ```bash
-
-   ./deploy.sh init
-
-   ./deploy.sh gensort
-
-   ```
-
-2. **Before Each Test**
-
-   ```bash
-
-   ./deploy.sh update    # If code changed
-
-   ./deploy.sh reset     # Clean + generate data
-
-   ```
-
-3. **Run Test**
-
-   ```bash
-
-   # Terminal 1: Start Master
-
-   sbt "runMain master.MasterServer 3"
-
-   
-
-   # Terminal 2: Start Workers
-
-   ./deploy.sh start 3
-
-   ```
-
-### Configuration
-
-Edit the following variables in deploy.sh as needed:
-
 ```bash
+# One-time setup
+./deploy.sh init
+./deploy.sh gensort   # if using gensort-based data
 
-PROJECT_DIR="/home/orange/332project"
+# Before each test
+./deploy.sh update
+./deploy.sh reset
 
-DATA_INPUT="/home/orange/data/input"
+# Terminal 1: Master (manual)
+sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G \
+  "runMain master.MasterServer 3"
+# → note printed IP:PORT and update MASTER_PORT in deploy.sh if needed
 
-DATA_OUTPUT="/home/orange/data/output"
-
-MASTER_IP="2.2.2.254"
-
-MASTER_PORT="5000"
-
-RECORDS_PER_WORKER=100000
-
+# Terminal 2: Workers
+./deploy.sh start 3
 ```
 
 ---
 
-## Troubleshooting
-
-### Common Issues
-
-**1. "Connection refused" error**
-
-- Ensure Master is running first
-- Check firewall allows ports 5000, 6000
-- Verify IP address is correct
-
-**2. Worker IP shows as 127.0.0.1**
-
-- `getLocalIP()` function not finding correct network interface
-- Check actual IP with `hostname -I` command on VM
-
-**3. Shuffle timeout**
-
-- Target Worker not started yet
-- Network connectivity issues
-
-**4. "Unknown worker" error**
-
-- PartitionPlan not received yet
-- Worker registration order issue
-
-### Log Checkpoints
-
-**Master:**
-
-```
-Worker registered: id=0, ip=2.2.2.101:6000
-Worker registered: id=1, ip=2.2.2.102:6000
-All workers connected!
-Broadcasting PartitionPlan to 3 workers...
-```
-
-**Worker:**
-
-```
-Received PartitionPlan for task=task-001
-Received 3 worker addresses:
-  worker#0 → 2.2.2.101:6000
-  worker#1 → 2.2.2.102:6000
-  worker#2 → 2.2.2.103:6000
-```
-
----
-
-## Architecture
+## Architecture Summary
 
 ### Master
 
-- Coordinates all workers
-- Calculates partition boundaries from samples
-- Distributes partition ranges to workers
-- Monitors worker status
+* Manages:
+
+  * Worker registration (`WorkerRegistry`)
+  * Heartbeats + failure detection
+  * Sampling + splitter computation
+  * `PartitionPlan` creation & broadcasting
+  * Partition ownership (`partitionOwners`)
+  * Shuffle & merge progress (`ShuffleTracker`)
+  * Shutdown broadcast when all merges are done
 
 ### Worker
 
-- Reads input data from multiple directories
-- Performs local sorting
-- Partitions data by key ranges
-- Shuffles data with other workers
-- Merges received partitions and writes output
+* Performs:
+
+  * Input load (from `-I` paths)
+  * Parallel local sorting (multi-thread)
+  * Partitioning by key ranges
+  * Shuffle via gRPC streaming (with retry + checkpoint)
+  * Recovery using `sent-checkpoint` data
+  * Final merge + output
+  * Periodic heartbeat to Master
 
 ---
 
 ## Technology Stack
 
-- **Language**: Scala 2.13
-- **Build Tool**: SBT
-- **Networking**: gRPC + Protocol Buffers
-- **Data Generation**: gensort
-
----
-
-## Usage
-
-### Start Master
-
-```bash
-master <number_of_workers>
-# Output: Master IP:port and worker IP ordering
-```
-
-### Start Worker
-
-```bash
-worker <master_ip:port> -I <input_dir1> <input_dir2> ... -O <output_dir>
-# Output files: partition.n, partition.n+1, partition.n+2, ...
-```
-
----
-
-## Project Timeline
-
-| Week | Dates        | Milestone              |
-| ---- | ------------ | ---------------------- |
-| 1-2  | Oct 13-26    | Basic Infrastructure   |
-| 3-4  | Oct 27-Nov 9 | Core Sorting Logic     |
-| 5    | Nov 10-16    | Distributed Operations |
-| 6-7  | Nov 17-30    | Fault Tolerance        |
-| 8    | Dec 1-7      | Testing & Optimization |
-
-### Key Deadlines
-
-- **Nov 16**: Progress Report Due
-- **Week 6**: Progress Presentation
-- **Dec 7**: Final Submission
-- **Week 9**: Final Presentation
-
----
-
-## Weekly Progress
-
-See detailed progress in [docs/](docs/) folder:
-
-- [Week 1](docs/Week1.md) - Oct 13-19
-- [Week 2](docs/Week2.md) - Oct 20-26
-- ...
-
----
-
-## Development Principles
-
-- **Correctness** over performance
-- **Simplicity** over premature optimization
-- **Document** all design decisions
-- Test incrementally with small datasets first
-
----
-
-## Resources
-
-- **gensort**: http://www.ordinal.com/gensort.html
-- **Project Spec**: [Course Website](http://pl.postech.ac.kr/~gla/cs332/schedule.html)
-- **gRPC Scala**: https://scalapb.github.io/
+* **Language**: Scala 2.13
+* **Build Tool**: SBT
+* **RPC Framework**: gRPC via ScalaPB
+* **Data Generator**: `gensort` (optional, for local tests)
+* **Cluster Environment**: POSTECH VMs (`2.2.2.xxx`)
 
 ---
 
 ## Repository Structure
 
-```
+```text
 332project/
 ├── src/
 │   ├── main/
-│   │   ├── scala/          # Source code
-│   │   └── protobuf/       # gRPC protocol definitions
-│   └── test/               # Test code
-├── docs/
-│   ├── Week1.md
-│   ├── Week2.md
-│   └── ...
-├── data/                   # Test data (gitignore)
-│   ├── input1/
-│   ├── input2/
-│   └── input3/
+│   │   ├── scala/
+│   │   │   ├── master/        # MasterServer, MasterServiceImpl, WorkerRegistry, etc.
+│   │   │   ├── worker/        # WorkerClient, WorkerState, WorkerServer, etc.
+│   │   │   └── common/        # RecordIO, sampling helpers
+│   │   └── protobuf/          # gRPC proto files
+│   └── test/                  # (Optional) tests
+├── docs/                      # Weekly progress, design notes
+├── deploy.sh                  # Cluster deployment helper
 ├── build.sbt
 └── README.md
 ```
