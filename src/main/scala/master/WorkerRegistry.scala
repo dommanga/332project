@@ -21,34 +21,31 @@ case class RegisteredWorker(
 class WorkerRegistry(expectedWorkers: Int) {
 
   private val workers = mutable.Map.empty[String, RegisteredWorker]  // IP -> Worker
-  private var idsAssigned = false
+  private var nextId = 0
 
   /** Register worker - initially assigns temporary ID based on IP */
   def register(info: WorkerInfo): WorkerAssignment = synchronized {
     val ip = info.ip
     
-    val existingWorker = workers.get(ip)
-    
-    existingWorker match {
+    workers.get(ip) match {
       case Some(w) if w.phase == DEAD =>
-        // Rejoining worker - keep same ID
         println(s"🔄 Worker ${info.ip} rejoining with ID ${w.id}")
-        workers(ip) = w.copy(
-          workerInfo = info.withPort(w.workerInfo.port),
+        val revived = w.copy(
+          workerInfo = info.copy(id = w.id),
           lastHeartbeat = Instant.now(),
           phase = ALIVE
         )
-        
+        workers(ip) = revived
+
         WorkerAssignment(
           success = true,
           message = s"Rejoined as worker ${w.id}",
           workerId = w.id,
           partitionIds = Seq.empty,
-          assignedPort = w.workerInfo.port
+          assignedPort = revived.workerInfo.port
         )
-        
+
       case Some(w) if w.phase == ALIVE =>
-        // Already registered and alive
         WorkerAssignment(
           success = true,
           message = s"Already registered as worker ${w.id}",
@@ -56,53 +53,38 @@ class WorkerRegistry(expectedWorkers: Int) {
           partitionIds = Seq.empty,
           assignedPort = w.workerInfo.port
         )
-        
+      
+      case Some(w) =>
+        // fallback – theoretically unreachable
+        println(s"⚠ Unexpected phase for worker at $ip: ${w.phase}")
+        WorkerAssignment(
+          success = true,
+          message = s"Registered as worker ${w.id} (unexpected phase)",
+          workerId = w.id,
+          partitionIds = Seq.empty,
+          assignedPort = w.workerInfo.port
+        )
+
       case None =>
-        // New worker - assign temporary ID -1 until all workers connect
-        val tempId = -1
-        
-        workers(ip) = RegisteredWorker(
-          id = tempId,
-          workerInfo = info,
+        val newId = nextId
+        nextId += 1
+
+        val newWorker = RegisteredWorker(
+          id = newId,
+          workerInfo = info.copy(id = newId),
           lastHeartbeat = Instant.now(),
           phase = ALIVE
         )
-        
-        // If all workers connected, assign final IDs based on IP ordering
-        if (workers.size == expectedWorkers && !idsAssigned) {
-          assignFinalIds()
-        }
-        
-        val finalId = workers(ip).id
-        val finalPort = workers(ip).workerInfo.port
-        
+        workers(ip) = newWorker
+
         WorkerAssignment(
           success = true,
-          message = s"Registered as worker $finalId",
-          workerId = finalId,
+          message = s"Registered as worker $newId",
+          workerId = newId,
           partitionIds = Seq.empty,
-          assignedPort = finalPort
+          assignedPort = newWorker.workerInfo.port
         )
-      
-      case Some(w) =>
-        throw new IllegalStateException(s"Unknown phase: ${w.phase}")
     }
-  }
-  
-  /**
-   * Assign final IDs based on IP address ordering
-   */
-  private def assignFinalIds(): Unit = {
-    val sortedWorkers = workers.toSeq.sortBy(_._1)  // Sort by IP
-    
-    sortedWorkers.zipWithIndex.foreach { case ((ip, worker), idx) =>
-      workers(ip) = worker.copy(
-        id = idx,
-        workerInfo = worker.workerInfo
-      )
-    }
-    
-    idsAssigned = true
   }
 
   /** Update heartbeat */
