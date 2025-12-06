@@ -254,7 +254,7 @@ class MasterServiceImpl(
       override def onCompleted(): Unit = {
         sampling.complete(workerId)
 
-        val limit = System.nanoTime() + 30_000_000_000L
+        val limit = System.nanoTime() + 60_000_000_000L
         while (!sampling.isReady && System.nanoTime() < limit)
           Thread.sleep(50)
 
