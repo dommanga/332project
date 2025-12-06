@@ -18,6 +18,44 @@ final case class WorkerConfig(
 /** Worker 실행 메인 */
 object WorkerClient {
 
+  // ===== Fault Injector =====
+  object FaultInjector {
+    private val enabledPhases = sys.env.get("FAULT_INJECT_PHASE")
+      .map(_.split(",").toSet)
+      .getOrElse(Set.empty)
+    
+    private val targetWorkerId = sys.env.get("FAULT_INJECT_WORKER")
+      .map(_.toInt)
+      .getOrElse(-1)
+    
+    def checkAndCrash(phase: String): Unit = {
+      if (enabledPhases.contains(phase)) {
+        val myId = WorkerState.getWorkerId
+        
+        // 특정 worker만 죽이기
+        if (targetWorkerId == -1 || targetWorkerId == myId) {
+          Console.err.println(s"\n💥💥💥 [FAULT INJECTION] 💥💥💥💥💥💥💥💥💥")
+          Console.err.println(s"💥 Worker $myId crashing at phase: $phase 💥")
+          Console.err.println(s"💥 Terminating in 2 seconds...                 💥")
+          Console.err.println(s"💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥\n")
+          Thread.sleep(2000)
+          System.exit(137)  // Simulate kill -9
+        }
+      }
+    }
+    
+    def maybeSleep(phase: String, seconds: Int = 10): Unit = {
+      if (enabledPhases.contains(phase)) {
+        val myId = WorkerState.getWorkerId
+        
+        if (targetWorkerId == -1 || targetWorkerId == myId) {
+          println(s"⏸️  [FAULT INJECTION] Worker $myId sleeping ${seconds}s at phase: $phase")
+          Thread.sleep(seconds * 1000)
+        }
+      }
+    }
+  }
+
   // ===== Heartbeat Manager =====
   object HeartbeatManager {
     private var thread: Thread = _
@@ -29,7 +67,7 @@ object WorkerClient {
           while (!Thread.currentThread().isInterrupted) {
             try {
               masterClient.sendHeartbeat(workerInfo)
-              Thread.sleep(5000)
+              Thread.sleep(3000)
             } catch {
               case _: InterruptedException => return
               case e: Exception => 
@@ -206,11 +244,15 @@ object WorkerClient {
 
       HeartbeatManager.start(updatedWorkerInfo, masterClient)
 
+      FaultInjector.checkAndCrash("after-register")
+
       // ---------------------------------------------------------
       // Sampling
       // ---------------------------------------------------------
       val samples = common.Sampling.uniformEveryN(conf.inputPaths, everyN = 1000)
       println(s"➡️  collected ${samples.size} sample keys")
+
+      FaultInjector.checkAndCrash("after-sampling")
 
       // ---------------------------------------------------------
       // Splitters creation
@@ -229,6 +271,8 @@ object WorkerClient {
       // Parallel sorting
       val sorted = parallelSort(allRecords, numThreads = 4)
       println("🔑 Local sorting completed")
+
+      FaultInjector.checkAndCrash("after-sort")
 
       // ---------------------------------------------------------
       // Partitioning
@@ -249,6 +293,8 @@ object WorkerClient {
         sorted.groupBy(rec => findPartition(extractKey(rec)))
 
       println(s"🧩 Partitioning complete → partitions=${partitioned.size}")
+
+      FaultInjector.checkAndCrash("after-partition")
 
       // ---------------------------------------------------------
       // Shuffle
@@ -347,6 +393,10 @@ object WorkerClient {
         
         batches.zipWithIndex.foreach { case (batch, batchIdx) =>
           println(s"  🔄 Batch ${batchIdx + 1}/${batches.size}: partitions ${batch.map(_._1).mkString(", ")}")
+
+          if (batchIdx == batches.size / 2) {
+            FaultInjector.checkAndCrash("mid-shuffle")
+          }
           
           val batchFutures = batch.map { case (pid, recs) =>
             Future {
@@ -372,6 +422,8 @@ object WorkerClient {
       println("-------------------------------------------------------")
       println("       🎉 Shuffle Completed")
       println("-------------------------------------------------------")
+
+      FaultInjector.checkAndCrash("after-shuffle")
       
       println("Shuffle completed, reporting to Master...")
 
@@ -394,6 +446,8 @@ object WorkerClient {
 
       println("Shuffle report sent to Master")
       println("⏳ Waiting for finalize command from Master...")
+
+      FaultInjector.checkAndCrash("before-finalize")
 
       WorkerState.awaitFinalizeComplete()
 

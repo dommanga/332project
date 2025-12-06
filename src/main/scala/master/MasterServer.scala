@@ -132,6 +132,8 @@ class MasterServer(port: Int, expectedWorkers: Int) {
 
           registry.pruneDeadWorkers(timeoutSeconds = 10) { deadId =>
             println(s"[Master] DEAD worker detected → $deadId")
+            
+            serviceImpl.handleWorkerFailure(deadId)
           }
         }
       }
@@ -329,8 +331,8 @@ class MasterServiceImpl(
     }
   }
 
-  private def handleMergeFailure(workerId: Int): Unit = {
-    println(s"[Master] handleMergeFailure(): Worker $workerId FAILED")
+  def handleWorkerFailure(workerId: Int): Unit = {
+    println(s"[Master] handleWorkerFailure(): Worker $workerId FAILED")
 
     val orphaned = partitionOwners.filter(_._2 == workerId).keys.toSet
     if (orphaned.isEmpty) {

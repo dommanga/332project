@@ -25,18 +25,26 @@ class WorkerRegistry {
 
   /** Register worker */
   def register(info: WorkerInfo): WorkerAssignment = synchronized {
-    val deadWorker = workers.find { case (_, w) => 
-      w.phase == DEAD
+    val existingWorker = workers.find { case (_, w) => 
+      w.workerInfo.ip == info.ip
     }
     
-    val workerId = deadWorker match {
-      case Some((id, _)) => 
-        println(s"[Registry] Reusing ID $id for restarted worker")
+    val workerId = existingWorker match {
+      case Some((id, w)) if w.phase == DEAD =>
+        println(s"[Registry] Worker at ${info.ip} rejoining with original ID $id")
         id
-      case None => 
+        
+      case Some((id, w)) if w.phase == ALIVE =>
+        println(s"[Registry] Worker at ${info.ip} re-registering with ID $id (was ALIVE)")
+        id
+        
+      case None =>
         val id = nextId
         nextId += 1
+        println(s"[Registry] New worker at ${info.ip} assigned ID $id")
         id
+      case _ =>
+        throw new RuntimeException("Unexpected state in worker registration")
     }
 
     val assignedPort = 8000 + workerId
