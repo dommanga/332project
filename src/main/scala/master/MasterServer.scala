@@ -190,30 +190,14 @@ class MasterServiceImpl(
 
         PlanStore.get match {
           case Some(plan) =>
-            println(s"📡 Worker ${assignment.workerId} rejoined — rebroadcasting PartitionPlan to ALL workers")
-
-            val allWorkers = registry.getAllWorkers
-
-            allWorkers.foreach { w =>
-              val (wip, wport) = (w.workerInfo.ip, w.workerInfo.port)
-
-              try {
-                val ch = ManagedChannelBuilder
-                  .forAddress(wip, wport)
-                  .usePlaintext()
-                  .build()
-
-                val stub = WorkerServiceGrpc.blockingStub(ch)
-                stub.setPartitionPlan(plan)
-
-                println(s"🔄 Sent updated PartitionPlan to Worker ${w.workerInfo.id} (${wip}:${wport})")
-
-                ch.shutdown()
-              } catch {
-                case e: Exception =>
-                  Console.err.println(s"❌ Failed to send updated Plan to worker ${w.workerInfo.id}: ${e.getMessage}")
-              }
-            }
+            val (ip, port) = (request.ip, assignment.assignedPort)
+            val channel = ManagedChannelBuilder.forAddress(ip, port)
+              .usePlaintext()
+              .build()
+            val stub = WorkerServiceGrpc.blockingStub(channel)
+            
+            stub.setPartitionPlan(plan)
+            println(s"✅ Resent PartitionPlan to Worker ${assignment.workerId}")
 
             ShuffleTracker.markShuffleComplete(assignment.workerId)
 
@@ -221,7 +205,9 @@ class MasterServiceImpl(
               println("🔧 All workers completed shuffle, triggering finalize")
               triggerFinalizePhase()
             }
-
+            
+            channel.shutdown()
+            
           case None =>
             Console.err.println("⚠️ No cached PartitionPlan to resend!")
         }
