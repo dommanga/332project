@@ -252,9 +252,8 @@ object WorkerClient {
 
       HeartbeatManager.start(updatedWorkerInfo, masterClient)
 
-      val myPartitions = WorkerState.getMyPartitions
-
-      if (myPartitions.nonEmpty && hasSentCheckpoints(conf.outputDir)) {
+      if (hasSentCheckpoints(conf.outputDir)) {
+        Thread.sleep(2000)
         // Checkpoint 있음 = 이미 shuffle 완료했었음
         println("🔄 Recovery mode: checkpoints found, waiting for finalize...")
         
