@@ -101,7 +101,6 @@ service WorkerService {
   rpc StartShuffle(TaskId) returns (Ack);
   rpc FinalizePartitions(TaskId) returns (Ack);
   
-  rpc RecoverPartitions(RecoveryRequest) returns (Ack);
   rpc RequestPartition(PartitionRequest) returns (stream PartitionChunk);
 
   rpc Shutdown(TaskId) returns (Ack);
@@ -132,10 +131,6 @@ message PartitionSendersQuery {
 message PartitionSendersResponse {
   int32 partition_id = 1;
   repeated int32 sender_ids = 2;
-}
-
-message RecoveryRequest {
-  repeated int32 partition_ids = 1;
 }
 
 message PartitionRequest {

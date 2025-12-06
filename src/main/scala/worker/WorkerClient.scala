@@ -191,6 +191,12 @@ object WorkerClient {
     }.toVector
   }
 
+  private def hasSentCheckpoints(outputDir: String): Boolean = {
+    val checkpointDir = new java.io.File(s"$outputDir/sent-checkpoint")
+    checkpointDir.exists() && 
+      checkpointDir.listFiles().exists(_.getName.startsWith("sent_p"))
+  }
+
   // ===== Main Entry Point =====
   def main(args: Array[String]): Unit = {
 
@@ -245,6 +251,24 @@ object WorkerClient {
       println(s"🔌 WorkerServer started on port ${assignment.assignedPort}")
 
       HeartbeatManager.start(updatedWorkerInfo, masterClient)
+
+      val myPartitions = WorkerState.getMyPartitions
+
+      if (myPartitions.nonEmpty && hasSentCheckpoints(conf.outputDir)) {
+        // Checkpoint 있음 = 이미 shuffle 완료했었음
+        println("🔄 Recovery mode: checkpoints found, waiting for finalize...")
+        
+        WorkerState.awaitFinalizeComplete()
+        
+        println("✅ Worker work completed")
+        println("⏳ Waiting for shutdown command from Master...")
+        WorkerState.awaitShutdownCommand()
+        
+        HeartbeatManager.stop()
+        masterClient.shutdown()
+        println("💀 Worker shutting down...")
+        return
+      }
 
       // ---------------------------------------------------------
       // Sampling

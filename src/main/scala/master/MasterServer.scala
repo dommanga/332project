@@ -196,7 +196,7 @@ class MasterServiceImpl(
         partitionOwners = partitionOwners.updated(pid, assignment.workerId)
       }
       
-      // ===== PartitionPlan 재전송 + Recovery 명령 =====
+      // ===== PartitionPlan 재전송 + Recovery trigger(Shuffle Complete - automatic missing detection) =====
       Future {
         Thread.sleep(2000)
 
@@ -211,11 +211,15 @@ class MasterServiceImpl(
             // PartitionPlan 재전송
             stub.setPartitionPlan(plan)
             println(s"[Master] ✅ Resent PartitionPlan to Worker ${assignment.workerId}")
+
+            ShuffleTracker.markShuffleComplete(assignment.workerId)
+
+            if (ShuffleTracker.isAllShuffleComplete) {
+              println("[Master] All alive workers completed shuffle (including recovered)")
+              triggerFinalizePhase()
+            }
             
             channel.shutdown()
-            
-            // Recovery 명령 전송
-            triggerRecovery(assignment.workerId, assignment.assignedPort, request.ip, orphaned)
             
           case None =>
             Console.err.println("[Master] ⚠️ No cached PartitionPlan to resend!")
@@ -297,36 +301,6 @@ class MasterServiceImpl(
           ShuffleTracker.init(expectedWorkers)
         }
       }
-    }
-  }
-
-  /**
-   * Worker 재등록 시 recovery 명령 전송
-   */
-  private def triggerRecovery(
-    workerId: Int, 
-    port: Int, 
-    ip: String, 
-    partitionIds: Set[Int]
-  ): Unit = {
-    try {
-      val channel = ManagedChannelBuilder
-        .forAddress(ip, port)
-        .usePlaintext()
-        .build()
-      
-      val stub = WorkerServiceGrpc.blockingStub(channel)
-      val request = RecoveryRequest(partitionIds = partitionIds.toSeq)
-      val ack = stub.recoverPartitions(request)
-      
-      println(s"[Master] ✅ Recovery command sent to Worker $workerId")
-      println(s"[Master]    Response: ${ack.msg}")
-      
-      channel.shutdown()
-    } catch {
-      case e: Exception =>
-        Console.err.println(s"[Master] ❌ Failed to send recovery: ${e.getMessage}")
-        e.printStackTrace()
     }
   }
 

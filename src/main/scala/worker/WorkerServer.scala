@@ -7,7 +7,6 @@ import rpc.sort.{
   Ack, 
   PartitionChunk, 
   TaskId, 
-  RecoveryRequest,
   PartitionRequest,
  }
 import io.grpc.stub.StreamObserver
@@ -464,38 +463,6 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     }
   }
 
-  override def recoverPartitions(request: RecoveryRequest): Future[Ack] = {
-    Future {
-      val partitionIds = request.partitionIds
-      
-      println(s"\n${"=" * 60}")
-      println(s"[Worker] 🔄 RECOVERY STARTED")
-      println(s"[Worker] Partitions to recover: ${partitionIds.mkString(", ")}")
-      println(s"${"=" * 60}\n")
-      
-      partitionIds.foreach { pid =>
-        try {
-          recoverPartition(pid)
-          println(s"[Worker] ✅ Partition p$pid recovered")
-        } catch {
-          case e: Exception =>
-            Console.err.println(s"[Worker] ❌ Failed to recover p$pid: ${e.getMessage}")
-            e.printStackTrace()
-        }
-      }
-      
-      println(s"[Worker] Reporting merge complete to Master...")
-      reportMergeCompleteToMaster()
-      WorkerState.signalFinalizeComplete()
-      
-      println(s"\n${"=" * 60}")
-      println(s"[Worker] 🎉 RECOVERY COMPLETED")
-      println(s"${"=" * 60}\n")
-      
-      Ack(ok = true, msg = s"Recovered ${partitionIds.size} partitions")
-    }
-  }
-
   override def requestPartition(
     request: PartitionRequest,
     responseObserver: StreamObserver[PartitionChunk]
@@ -559,42 +526,6 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
       
       Ack(ok = true, msg = "Shutdown acknowledged")
     }
-  }
-
-  /**
-   * 단일 partition 복구
-   */
-  private def recoverPartition(partitionId: Int): Unit = {
-    val finalFile = new java.io.File(s"$outputDir/partition.$partitionId")
-    if (finalFile.exists() && finalFile.length() > 0) {
-      println(s"[Worker] ✅ p$partitionId already finalized, skipping recovery")
-      return
-    }
-    
-    println(s"[Worker] Recovering partition p$partitionId...")
-    
-    // Step 1: 자기 sent checkpoint 확인
-    val sentFile = new java.io.File(s"$outputDir/sent-checkpoint/sent_p${partitionId}.dat")
-    
-    val myData = if (sentFile.exists() && sentFile.length() > 0) {
-      println(s"[Worker] Step 1: Loading own checkpoint")
-      loadCheckpointFile(sentFile)
-    } else {
-      println(s"[Worker] Step 1: Regenerating from input")
-      regenerateOwnPartition(partitionId)
-    }
-    
-    if (myData.nonEmpty) {
-      PartitionStore.addRun(s"p$partitionId", myData, checkpointDir)
-    }
-    
-    // Step 2: Peer들에게 요청
-    println(s"[Worker] Step 2: Requesting from peers")
-    requestCheckpointsFromPeers(partitionId)
-    
-    // Step 3: Merge
-    println(s"[Worker] Step 3: Merging")
-    finalizePartition(s"p$partitionId")
   }
 
   private def loadCheckpointFile(file: java.io.File): Array[Array[Byte]] = {
