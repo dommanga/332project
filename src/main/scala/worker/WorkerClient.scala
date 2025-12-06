@@ -280,17 +280,8 @@ object WorkerClient {
       val splitterKeys: Array[Array[Byte]] = WorkerState.getSplitters
       println(s"🔑 Loaded ${splitterKeys.length} splitters from PartitionPlan")
 
-      def findPartition(key: Array[Byte]): Int = {
-        var idx = 0
-        while (idx < splitterKeys.length &&
-                RecordIO.compareKeys(splitterKeys(idx), key) < 0) {
-          idx += 1
-        }
-        idx
-      }
-
       val partitioned =
-        sorted.groupBy(rec => findPartition(extractKey(rec)))
+        sorted.groupBy(rec => WorkerState.findPartitionId(extractKey(rec)))
 
       println(s"🧩 Partitioning complete → partitions=${partitioned.size}")
 

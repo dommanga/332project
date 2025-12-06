@@ -3,6 +3,7 @@ package worker
 import scala.collection.mutable
 import java.util.concurrent.CountDownLatch
 import rpc.sort._
+import common.RecordIO
 
 object WorkerState {
   @volatile private var _masterClient: Option[MasterClient] = None
@@ -117,6 +118,15 @@ object WorkerState {
       case None =>
         throw new RuntimeException("PartitionPlan not available - cannot extract splitters!")
     }
+  }
+
+  def findPartitionId(key: Array[Byte]): Int = {
+    val splitters = getSplitters
+    var idx = 0
+    while (idx < splitters.length && RecordIO.compareKeys(splitters(idx), key) < 0) {
+      idx += 1
+    }
+    idx
   }
 
   // ===== Shuffle Report 관련 =====

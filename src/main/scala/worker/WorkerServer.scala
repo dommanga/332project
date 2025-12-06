@@ -73,15 +73,6 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   println(s"[Worker] Checkpoint dir: ${checkpointDir.getAbsolutePath}")
 
   // -----------------------------
-  //  PartitionPlan 저장 (그대로 유지)
-  // -----------------------------
-  object PlanStore {
-    @volatile private var latest: Option[PartitionPlan] = None
-    def set(p: PartitionPlan): Unit = latest = Some(p)
-    def get: Option[PartitionPlan] = latest
-  }
-
-  // -----------------------------
   //  Partition 데이터 저장소 (In Memory)
   //   - partition_id 별로 "sorted run" 여러 개를 쌓아둠
   //   - run 하나 = Array[Array[Byte]] (각 원소가 100바이트 레코드)
@@ -91,6 +82,11 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     private val runData = mutable.Map.empty[String, mutable.ArrayBuffer[Array[Array[Byte]]]]
     
     def addRun(partitionId: String, run: Array[Array[Byte]], checkpointDir: java.io.File): Unit = this.synchronized {
+      if (runData.contains(partitionId) && runData(partitionId).nonEmpty) {
+        println(s"[PartitionStore] ⚠️ Run $partitionId already exists, skipping duplicate")
+        return
+      }
+
       val runs = runData.getOrElseUpdate(partitionId, mutable.ArrayBuffer.empty)
       runs += run
       println(s"[PartitionStore] Added run to $partitionId: ${run.length} records (memory only)")
@@ -165,7 +161,6 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     }
     
     WorkerState.setPartitionPlan(plan)
-    PlanStore.set(plan)
     Future.successful(Ack(ok = true, msg = "Plan received"))
   }
 
@@ -626,24 +621,10 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     }
     
     // Extract partition
-    val plan = PlanStore.get
-    if (plan.isEmpty) {
-      Console.err.println(s"[Worker] ⚠️ No partition plan!")
-      return Array.empty
-    }
-    
-    val splitters = plan.get.ranges.dropRight(1).map(_.hi.toByteArray)
-    
-    def findPartition(key: Array[Byte]): Int = {
-      var idx = 0
-      while (idx < splitters.length && RecordIO.compareKeys(splitters(idx), key) < 0) {
-        idx += 1
-      }
-      idx
-    }
+    val splitters = WorkerState.getSplitters
     
     val myPartitionData = sorted.filter { rec =>
-      findPartition(keyOf(rec)) == partitionId
+      WorkerState.findPartitionId(keyOf(rec)) == partitionId
     }
     
     println(s"[Worker]   Extracted ${myPartitionData.size} records for p$partitionId")
@@ -667,8 +648,23 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
       case Some(addresses) =>
         val myId = WorkerState.getWorkerId
         val otherWorkers = addresses.filter { case (wid, _) => wid != myId }
+
+        val alreadyReceived = PartitionStore.getSendersForPartition(s"p$partitionId")
+        println(s"[Worker]     Already received from: $alreadyReceived")
         
-        otherWorkers.foreach { case (wid, (ip, port)) =>
+        val workersToRequest = otherWorkers.filterNot { case (wid, _) => 
+          alreadyReceived.contains(wid)
+        }
+        
+        if (workersToRequest.isEmpty) {
+          println(s"[Worker]     No missing data for p$partitionId")
+          return
+        }
+        
+        println(s"[Worker]     Requesting from: ${workersToRequest.keys.mkString(", ")}")
+        
+        
+        workersToRequest.foreach { case (wid, (ip, port)) =>
           try {
             val channel = ManagedChannelBuilder
               .forAddress(ip, port)
