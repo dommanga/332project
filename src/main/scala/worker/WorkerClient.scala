@@ -216,7 +216,7 @@ object WorkerClient {
       // Splitters creation
       // ---------------------------------------------------------
       masterClient.sendSamples(samples)
-      println(s"➡️  received ${splitters.key.size} splitters from Master")
+      println(s"✅  Sampling phase complete")
 
       // ---------------------------------------------------------
       // Load and Sort
