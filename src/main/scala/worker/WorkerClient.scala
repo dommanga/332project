@@ -348,7 +348,7 @@ object WorkerClient {
                 val backoff = 3000 * attempt
                 Thread.sleep(backoff)
               } else {
-                Console.err.println(s"❌ Failed to send p$partitionId after $maxRetries attempts")
+                Console.err.println(s"⚠️ Failed to send p$partitionId after $maxRetries attempts")
                 return false
               }
           }
