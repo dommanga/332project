@@ -13,6 +13,50 @@ object WorkerState {
   private var _shuffleReport: Option[ShuffleCompletionReport] = None
   private val finalizeLatch = new CountDownLatch(1)
 
+  /**
+   * PartitionPlan이 없으면 자동으로 재생성
+   */
+  private def ensurePartitionPlan(): Unit = {
+    if (_partitionPlan.isEmpty) {
+      println("[WorkerState] ⚠️ PartitionPlan missing, reconstructing...")
+      
+      _workerAddresses match {
+        case Some(addresses) =>
+          val numWorkers = addresses.size
+          val numPartitions = numWorkers * 4
+          
+          // PartitionPlan 재구성
+          val partitionsPerWorker = (numPartitions + numWorkers - 1) / numWorkers
+          
+          val ranges = (0 until numPartitions).map { pid =>
+            val targetWorker = pid / partitionsPerWorker
+            
+            PartitionRange(
+              lo = com.google.protobuf.ByteString.EMPTY,
+              hi = com.google.protobuf.ByteString.EMPTY,
+              targetWorker = targetWorker
+            )
+          }
+          
+          val workers = addresses.map { case (id, (ip, port)) =>
+            WorkerAddress(workerId = id, ip = ip, port = port)
+          }.toSeq
+          
+          val reconstructedPlan = PartitionPlan(
+            task = Some(TaskId("recovered")),
+            ranges = ranges,
+            workers = workers
+          )
+          
+          _partitionPlan = Some(reconstructedPlan)
+          println(s"[WorkerState] ✅ Reconstructed PartitionPlan: $numPartitions partitions, $numWorkers workers")
+          
+        case None =>
+          throw new RuntimeException("Cannot reconstruct PartitionPlan: no worker addresses!")
+      }
+    }
+  }
+
   // ===== WorkerInfo 관련 =====
   def setWorkerInfo(info: WorkerInfo): Unit = {
     _workerInfo = Some(info)
@@ -47,14 +91,51 @@ object WorkerState {
 
   def setPartitionPlan(plan: PartitionPlan): Unit = {
     _partitionPlan = Some(plan)
+    println(s"[WorkerState] Stored partition plan with ${plan.ranges.size} ranges")
   }
 
   def getPartitionTargetWorker(partitionId: Int): Int = {
+    ensurePartitionPlan()
+    
     _partitionPlan match {
       case Some(plan) if partitionId < plan.ranges.size =>
         plan.ranges(partitionId).targetWorker
-      case _ =>
-        throw new RuntimeException(s"No target worker info for partition $partitionId")
+      case Some(plan) =>
+        throw new RuntimeException(s"Partition $partitionId out of range (max: ${plan.ranges.size - 1})")
+      case None =>
+        throw new RuntimeException("PartitionPlan reconstruction failed!")
+    }
+  }
+
+  def getMyPartitions: Seq[Int] = {
+    ensurePartitionPlan()
+    
+    val myId = getWorkerId
+    _partitionPlan match {
+      case Some(plan) =>
+        plan.ranges.zipWithIndex
+          .filter(_._1.targetWorker == myId)
+          .map(_._2)
+      case None =>
+        throw new RuntimeException("PartitionPlan reconstruction failed!")
+    }
+  }
+
+  def getTotalPartitions: Int = {
+    ensurePartitionPlan()
+    _partitionPlan.map(_.ranges.size).getOrElse(0)
+  }
+
+  def getSplitters: Array[Array[Byte]] = {
+    ensurePartitionPlan()
+    
+    _partitionPlan match {
+      case Some(plan) =>
+        // ranges에서 hi 값 추출 (마지막 range 제외)
+        plan.ranges.dropRight(1).map(_.hi.toByteArray).toArray
+      
+      case None =>
+        throw new RuntimeException("PartitionPlan not available - cannot extract splitters!")
     }
   }
 

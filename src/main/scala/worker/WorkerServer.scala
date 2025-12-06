@@ -362,22 +362,9 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     }
   }
 
-  private def detectAndRequestMissingPartitions(): Unit = {
-    val plan = PlanStore.get
-    if (plan.isEmpty) {
-      println("[Worker] No partition plan")
-      return
-    }
-    
-    val myId = WorkerState.getWorkerId
-    val totalWorkers = plan.get.workers.size
-    val numPartitions = plan.get.ranges.size
-    
+  private def detectAndRequestMissingPartitions(): Unit = {  
     // 내가 받아야 하는 partitions
-    val partitionsPerWorker = (numPartitions + totalWorkers - 1) / totalWorkers
-    val myStartPartition = myId * partitionsPerWorker
-    val myEndPartition = Math.min((myId + 1) * partitionsPerWorker, numPartitions)
-    val expectedPartitions = myStartPartition until myEndPartition
+    val expectedPartitions = WorkerState.getMyPartitions
     
     println(s"[Worker] Checking ${expectedPartitions.size} partitions for missing senders...")
     

@@ -169,6 +169,135 @@ class MasterServiceImpl(
 
   private def expectedWorkers: Int = sampling.expectedWorkers
 
+  object PlanStore {
+    @volatile private var latestPlan: Option[PartitionPlan] = None
+    
+    def set(plan: PartitionPlan): Unit = {
+      latestPlan = Some(plan)
+      println(s"[PlanStore] Cached PartitionPlan with ${plan.ranges.size} ranges")
+    }
+    
+    def get: Option[PartitionPlan] = latestPlan
+  }
+
+  /* ---------------- Worker Registration ---------------- */
+  override def registerWorker(request: WorkerInfo): Future[WorkerAssignment] = Future {
+    val assignment = registry.register(request)
+
+    val orphaned = partitionOwners.filter(_._2 == -1).keys.toSet
+
+    if (orphaned.nonEmpty && assignment.workerId < expectedWorkers) {
+      println(s"[Master] 🎉 Worker ${assignment.workerId} REJOINED!")
+      println(s"[Master] Assigning recovery partitions: $orphaned")
+      
+      orphaned.foreach { pid =>
+        partitionOwners = partitionOwners.updated(pid, assignment.workerId)
+      }
+      
+      // ===== PartitionPlan 재전송 + Recovery 명령 =====
+      Future {
+        Thread.sleep(2000)
+
+        PlanStore.get match {
+          case Some(plan) =>
+            val (ip, port) = (request.ip, assignment.assignedPort)
+            val channel = ManagedChannelBuilder.forAddress(ip, port)
+              .usePlaintext()
+              .build()
+            val stub = WorkerServiceGrpc.blockingStub(channel)
+            
+            // PartitionPlan 재전송
+            stub.setPartitionPlan(plan)
+            println(s"[Master] ✅ Resent PartitionPlan to Worker ${assignment.workerId}")
+            
+            channel.shutdown()
+            
+            // Recovery 명령 전송
+            triggerRecovery(assignment.workerId, assignment.assignedPort, request.ip, orphaned)
+            
+          case None =>
+            Console.err.println("[Master] ⚠️ No cached PartitionPlan to resend!")
+        }
+      }
+    }
+
+    if (registry.size == expectedWorkers) {
+      println("\nAll workers connected!")
+      registry.getAllWorkers.sortBy(_.id).foreach { w =>
+        println(s"  ${w.id}: ${w.workerInfo.ip}")
+      }
+    }
+    assignment
+  }
+
+  /* ---------------- Heartbeat ---------------- */
+  override def heartbeat(request: WorkerInfo): Future[Ack] = Future {
+    registry.updateHeartbeat(request)
+    println(s"Heartbeat from ${request.id}")
+    Ack(ok = true, msg = "Heartbeat OK")
+  }
+
+
+  /* ---------------- Sampling ---------------- */
+  override def sendSamples(responseObserver: StreamObserver[Splitters]): StreamObserver[Sample] = {
+    val workerId = nextSamplesWorker.getAndIncrement()
+
+    new StreamObserver[Sample] {
+      override def onNext(sample: Sample): Unit =
+        sampling.submit(workerId, sample.key.toByteArray)
+
+      override def onError(t: Throwable): Unit =
+        println(s"[sendSamples] Worker#$workerId error: ${t.getMessage}")
+
+      override def onCompleted(): Unit = {
+        sampling.complete(workerId)
+
+        val limit = System.nanoTime() + 30_000_000_000L
+        while (!sampling.isReady && System.nanoTime() < limit)
+          Thread.sleep(50)
+
+        val split = sampling.splitters
+
+        responseObserver.onNext(
+          Splitters(key = split.map(com.google.protobuf.ByteString.copyFrom).toIndexedSeq)
+        )
+        responseObserver.onCompleted()
+
+        if (sampling.isReady && !planBroadcasted) {
+          planBroadcasted = true
+
+          initializeShufflePlan(expectedWorkers)
+
+          val wAddrs =
+            registry.getAllWorkers.map(w => WorkerAddress(w.id, w.workerInfo.ip, w.workerInfo.port))
+
+          val plan = PartitionPlanner.createPlan(
+            split.toSeq,
+            expectedWorkers, 
+            wAddrs
+          )
+          PlanStore.set(plan)
+
+          println("[Master] Broadcasting PartitionPlan")
+
+          registry.getAllWorkers.foreach { w =>
+            val ch = ManagedChannelBuilder.forAddress(w.workerInfo.ip, w.workerInfo.port)
+              .usePlaintext()
+              .build()
+            val stub = WorkerServiceGrpc.blockingStub(ch)
+
+            stub.setPartitionPlan(plan)
+            stub.startShuffle(TaskId("task-001"))
+
+            ch.shutdown()
+          }
+
+          ShuffleTracker.init(expectedWorkers)
+        }
+      }
+    }
+  }
+
   /**
    * Worker 재등록 시 recovery 명령 전송
    */
@@ -218,104 +347,6 @@ class MasterServiceImpl(
     
     println(s"[Master] ⚠️ Partitions $orphaned are PENDING RECOVERY")
     println(s"[Master] ℹ️ Please restart Worker $workerId on its original node")
-  }
-
-  /* ---------------- Worker Registration ---------------- */
-  override def registerWorker(request: WorkerInfo): Future[WorkerAssignment] = Future {
-    val assignment = registry.register(request)
-
-    val orphaned = partitionOwners.filter(_._2 == -1).keys.toSet
-
-    if (orphaned.nonEmpty && assignment.workerId < expectedWorkers) {
-      println(s"[Master] 🎉 Worker ${assignment.workerId} REJOINED!")
-      println(s"[Master] Assigning recovery partitions: $orphaned")
-      
-      orphaned.foreach { pid =>
-        partitionOwners = partitionOwners.updated(pid, assignment.workerId)
-      }
-      
-      // Recovery 명령 전송 (비동기)
-      Future {
-        Thread.sleep(2000)
-        triggerRecovery(assignment.workerId, assignment.assignedPort, request.ip, orphaned)
-      }
-    }
-
-    if (registry.size == expectedWorkers) {
-      println("\nAll workers connected!")
-      registry.getAllWorkers.sortBy(_.id).foreach { w =>
-        println(s"  ${w.id}: ${w.workerInfo.ip}")
-      }
-    }
-    assignment
-  }
-
-
-  /* ---------------- Heartbeat ---------------- */
-  override def heartbeat(request: WorkerInfo): Future[Ack] = Future {
-    registry.updateHeartbeat(request)
-    println(s"Heartbeat from ${request.id}")
-    Ack(ok = true, msg = "Heartbeat OK")
-  }
-
-
-  /* ---------------- Sampling ---------------- */
-  override def sendSamples(responseObserver: StreamObserver[Splitters]): StreamObserver[Sample] = {
-    val workerId = nextSamplesWorker.getAndIncrement()
-
-    new StreamObserver[Sample] {
-      override def onNext(sample: Sample): Unit =
-        sampling.submit(workerId, sample.key.toByteArray)
-
-      override def onError(t: Throwable): Unit =
-        println(s"[sendSamples] Worker#$workerId error: ${t.getMessage}")
-
-      override def onCompleted(): Unit = {
-        sampling.complete(workerId)
-
-        val limit = System.nanoTime() + 30_000_000_000L
-        while (!sampling.isReady && System.nanoTime() < limit)
-          Thread.sleep(50)
-
-        val split = sampling.splitters
-
-        responseObserver.onNext(
-          Splitters(key = split.map(com.google.protobuf.ByteString.copyFrom).toIndexedSeq)
-        )
-        responseObserver.onCompleted()
-
-        if (sampling.isReady && !planBroadcasted) {
-          planBroadcasted = true
-
-          initializeShufflePlan(expectedWorkers)
-
-          val wAddrs =
-            registry.getAllWorkers.map(w => WorkerAddress(w.id, w.workerInfo.ip, w.workerInfo.port))
-
-          val plan = PartitionPlanner.createPlan(
-            split.toSeq,
-            expectedWorkers, 
-            wAddrs
-          )
-
-          println("[Master] Broadcasting PartitionPlan")
-
-          registry.getAllWorkers.foreach { w =>
-            val ch = ManagedChannelBuilder.forAddress(w.workerInfo.ip, w.workerInfo.port)
-              .usePlaintext()
-              .build()
-            val stub = WorkerServiceGrpc.blockingStub(ch)
-
-            stub.setPartitionPlan(plan)
-            stub.startShuffle(TaskId("task-001"))
-
-            ch.shutdown()
-          }
-
-          ShuffleTracker.init(expectedWorkers)
-        }
-      }
-    }
   }
 
 

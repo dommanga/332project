@@ -215,8 +215,8 @@ object WorkerClient {
       // ---------------------------------------------------------
       // Splitters 수신
       // ---------------------------------------------------------
-      val splitters = masterClient.sendSamples(samples)
-      println(s"➡️  received ${splitters.key.size} splitters from Master")
+      // val splitters = masterClient.sendSamples(samples)
+      // println(s"➡️  received ${splitters.key.size} splitters from Master")
 
       // ---------------------------------------------------------
       // Load and Sort
@@ -233,8 +233,8 @@ object WorkerClient {
       // ---------------------------------------------------------
       // Partitioning
       // ---------------------------------------------------------
-      val splitterKeys: Array[Array[Byte]] =
-        splitters.key.map(_.toByteArray).toArray
+      val splitterKeys: Array[Array[Byte]] = WorkerState.getSplitters
+      println(s"🔑 Loaded ${splitterKeys.length} splitters from PartitionPlan")
 
       def findPartition(key: Array[Byte]): Int = {
         var idx = 0
