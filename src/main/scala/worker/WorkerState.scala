@@ -8,6 +8,7 @@ object WorkerState {
   @volatile private var _masterClient: Option[MasterClient] = None
   @volatile private var _workerInfo: Option[WorkerInfo] = None
   @volatile private var _workerAddresses: Option[Map[Int, (String, Int)]] = None
+  @volatile private var _partitionPlan: Option[PartitionPlan] = None
   
   private var _shuffleReport: Option[ShuffleCompletionReport] = None
   private val finalizeLatch = new CountDownLatch(1)
@@ -43,6 +44,19 @@ object WorkerState {
   }
 
   def getWorkerAddresses: Option[Map[Int, (String, Int)]] = _workerAddresses
+
+  def setPartitionPlan(plan: PartitionPlan): Unit = {
+    _partitionPlan = Some(plan)
+  }
+
+  def getPartitionTargetWorker(partitionId: Int): Int = {
+    _partitionPlan match {
+      case Some(plan) if partitionId < plan.ranges.size =>
+        plan.ranges(partitionId).targetWorker
+      case _ =>
+        throw new RuntimeException(s"No target worker info for partition $partitionId")
+    }
+  }
 
   // ===== Shuffle Report 관련 =====
   def setShuffleReport(report: ShuffleCompletionReport): Unit = {

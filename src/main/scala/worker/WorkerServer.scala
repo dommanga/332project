@@ -164,6 +164,7 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
       WorkerState.setWorkerAddresses(addresses)
     }
     
+    WorkerState.setPartitionPlan(plan)
     PlanStore.set(plan)
     Future.successful(Ack(ok = true, msg = "Plan received"))
   }

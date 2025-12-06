@@ -373,12 +373,13 @@ class MasterServiceImpl(
   }
 
   private def initializeShufflePlan(numWorkers: Int): Unit = {
-    // 일단 100개 partition 가정 (나중에 동적으로 변경 가능)
     val numPartitions = numWorkers * 4
+    val partitionsPerWorker = (numPartitions + numWorkers - 1) / numWorkers
 
     (0 until numPartitions).foreach { pid =>
       shufflePlan(pid) = (0 until numWorkers).toSet
-      partitionOwners = partitionOwners.updated(pid, pid % numWorkers)
+      val targetWorker = pid / partitionsPerWorker
+      partitionOwners = partitionOwners.updated(pid, targetWorker)
     }
     println(s"[Master] Initialized: $numPartitions partitions, $numWorkers workers")
   }

@@ -33,6 +33,9 @@ object PartitionPlanner {
     // Bounds = [MIN, splitters..., MAX]
     val bounds = Seq(fullMin) ++ splitters ++ Seq(fullMax)
 
+    val totalPartitions = bounds.size - 1  // splitters.size + 1
+    val partitionsPerWorker = (totalPartitions + numWorkers - 1) / numWorkers
+
     // Sliding window → (lo, hi)
     bounds
       .sliding(2)
@@ -41,7 +44,7 @@ object PartitionPlanner {
         PartitionRange(
           lo = ByteString.copyFrom(lo),
           hi = ByteString.copyFrom(hi),
-          targetWorker = idx % numWorkers
+          targetWorker = idx / partitionsPerWorker
         )
       }
       .toSeq
