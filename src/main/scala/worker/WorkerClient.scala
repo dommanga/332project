@@ -231,26 +231,6 @@ object WorkerClient {
       println("🔑 Local sorting completed")
 
       // ---------------------------------------------------------
-      // Partitioning
-      // ---------------------------------------------------------
-      val splitterKeys: Array[Array[Byte]] = WorkerState.getSplitters
-      println(s"🔑 Loaded ${splitterKeys.length} splitters from PartitionPlan")
-
-      def findPartition(key: Array[Byte]): Int = {
-        var idx = 0
-        while (idx < splitterKeys.length &&
-                RecordIO.compareKeys(splitterKeys(idx), key) < 0) {
-          idx += 1
-        }
-        idx
-      }
-
-      val partitioned =
-        sorted.groupBy(rec => findPartition(extractKey(rec)))
-
-      println(s"🧩 Partitioning complete → partitions=${partitioned.size}")
-
-      // ---------------------------------------------------------
       // Wait for PartitionPlan
       // ---------------------------------------------------------
       println("⏳ Waiting for PartitionPlan with worker addresses...")
@@ -274,6 +254,26 @@ object WorkerClient {
       if (workerAddresses.isEmpty) {
         throw new RuntimeException("Timeout waiting for PartitionPlan with worker addresses")
       }
+
+      // ---------------------------------------------------------
+      // Partitioning
+      // ---------------------------------------------------------
+      val splitterKeys: Array[Array[Byte]] = WorkerState.getSplitters
+      println(s"🔑 Loaded ${splitterKeys.length} splitters from PartitionPlan")
+
+      def findPartition(key: Array[Byte]): Int = {
+        var idx = 0
+        while (idx < splitterKeys.length &&
+                RecordIO.compareKeys(splitterKeys(idx), key) < 0) {
+          idx += 1
+        }
+        idx
+      }
+
+      val partitioned =
+        sorted.groupBy(rec => findPartition(extractKey(rec)))
+
+      println(s"🧩 Partitioning complete → partitions=${partitioned.size}")
 
       // ---------------------------------------------------------
       // Shuffle
