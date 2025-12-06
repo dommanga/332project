@@ -18,6 +18,8 @@ final case class WorkerConfig(
 /** Worker 실행 메인 */
 object WorkerClient {
 
+  private val StateDir: String = ".worker_state"
+
   // ===== Fault Injector =====
   object FaultInjector {
     private val enabledPhases = sys.env.get("FAULT_INJECT_PHASE")
@@ -200,8 +202,12 @@ object WorkerClient {
           return
       }
 
-      val workerServer = new WorkerServer(0, conf.outputDir)
-      val actualPort = workerServer.start()
+      val previousPort = loadSavedPort().getOrElse(0)
+
+      val workerServer = new WorkerServer(previousPort, conf.outputDir)
+      val actualPort   = workerServer.start()
+
+      savePort(actualPort)
 
       val masterAddr = conf.masterAddr.split(":")
       val workerInfo = WorkerInfo(
@@ -587,4 +593,40 @@ object WorkerClient {
         |""".stripMargin
     Console.err.println(msg)
   }
+
+  // ---------------------------------------------------------
+  // Port persistence helpers (stateful restart)
+  // ---------------------------------------------------------
+  private def loadSavedPort(): Option[Int] = {
+    val dir = new java.io.File(StateDir)
+    val f   = new java.io.File(dir, "worker-port.state")
+
+    if (!f.exists()) return None
+
+    try {
+      val src  = scala.io.Source.fromFile(f)
+      try {
+        val text = src.getLines().mkString.trim
+        if (text.nonEmpty) Some(text.toInt) else None
+      } finally {
+        src.close()
+      }
+    } catch {
+      case _: Throwable => None
+    }
+  }
+
+  private def savePort(port: Int): Unit = {
+    val dir = new java.io.File(StateDir)
+    dir.mkdirs()
+
+    val f  = new java.io.File(dir, "worker-port.state")
+    val pw = new java.io.PrintWriter(f)
+    try {
+      pw.println(port.toString)
+    } finally {
+      pw.close()
+    }
+  }
+
 }
