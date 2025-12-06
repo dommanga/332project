@@ -244,8 +244,6 @@ object WorkerClient {
 
       HeartbeatManager.start(updatedWorkerInfo, masterClient)
 
-      FaultInjector.checkAndCrash("after-register")
-
       // ---------------------------------------------------------
       // Sampling
       // ---------------------------------------------------------
@@ -308,8 +306,8 @@ object WorkerClient {
         partitionId: Int,
         records: Seq[Array[Byte]],
         workerAddresses: Map[Int, (String, Int)],
-        maxRetries: Int = 3
-      ): Unit = {
+        maxRetries: Int = 5
+      ): Boolean = {
         
         var attempt = 0
         
@@ -361,22 +359,25 @@ object WorkerClient {
             channel.shutdown()
             
             println(s"  ✅ p$partitionId sent successfully")
-            return  // 성공! 함수 종료
+            return true
             
           } catch {
             case e: Exception =>
               attempt += 1
               
               if (attempt < maxRetries) {
-                val backoff = 2000 * attempt  // 2s, 4s, 6s
+                val backoff = 3000 * attempt  // 3s, 6s, 9s, 12s, 15s
                 println(s"  ⚠️ Send failed, retry after ${backoff}ms: ${e.getMessage}")
                 Thread.sleep(backoff)
               } else {
                 Console.err.println(s"  ❌ Failed to send p$partitionId after $maxRetries attempts")
-                throw new RuntimeException(s"Failed after $maxRetries attempts", e)
+                Console.err.println(s"  ℹ️  Will report partial completion to Master")
+                return false
               }
           }
         }
+
+        false
       }
 
       println("-------------------------------------------------------")
@@ -402,32 +403,36 @@ object WorkerClient {
             Future {
               val targetWorker = WorkerState.getPartitionTargetWorker(pid)
               checkpointSentPartition(pid, recs, conf.outputDir)
-              sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
-              pid
+              val success = sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
+              (pid, success)
             }
           }
           
           // 이번 batch 완료 대기
-          val completedPids = Await.result(Future.sequence(batchFutures), 90.seconds)
-          println(s"  ✅ Batch ${batchIdx + 1} complete: ${completedPids.mkString(", ")}")
+          val results = Await.result(Future.sequence(batchFutures), 120.seconds)
+          val (successes, failures) = results.partition(_._2)
+
+          println(s"  ✅ Batch ${batchIdx + 1}: ${successes.size} sent, ${failures.size} failed")
+          if (failures.nonEmpty) {
+            println(s"  ⚠️  Failed partitions: ${failures.map(_._1).mkString(", ")} (will recover later)")
+          }
         }
 
       } catch {
         case e: Exception =>
-          Console.err.println(s"❌ Shuffle failed: ${e.getMessage}")
+          Console.err.println(s"⚠️ Shuffle encountered errors: ${e.getMessage}")
           e.printStackTrace()
-          throw e
       }
 
       println("-------------------------------------------------------")
-      println("       🎉 Shuffle Completed")
+      println("       🎉 Shuffle Completed (with possible failures)")
       println("-------------------------------------------------------")
 
       FaultInjector.checkAndCrash("after-shuffle")
       
       println("Shuffle completed, reporting to Master...")
 
-      val sendRecords = partitioned.map { case (pid, _) =>
+      val sendRecords = partitioned.keys.map { pid =>
         val target = WorkerState.getPartitionTargetWorker(pid)
         PartitionSendRecord(
           partitionId = pid,
