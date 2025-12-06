@@ -427,8 +427,6 @@ object WorkerClient {
       println("       🎉 Shuffle Completed (with possible failures)")
       println("-------------------------------------------------------")
 
-      FaultInjector.checkAndCrash("after-shuffle")
-      
       println("Shuffle completed, reporting to Master...")
 
       val sendRecords = partitioned.keys.map { pid =>

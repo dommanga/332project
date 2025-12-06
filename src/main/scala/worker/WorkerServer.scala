@@ -347,9 +347,9 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
       
       // Missing Detection
       detectAndRequestMissingPartitions()
-      
+      WorkerClient.FaultInjector.checkAndCrash("finalize-1")
       finalizeAll()
-      
+      WorkerClient.FaultInjector.checkAndCrash("finalize-2")
       reportMergeCompleteToMaster()
       WorkerState.signalFinalizeComplete()
       
