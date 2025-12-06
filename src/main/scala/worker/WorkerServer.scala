@@ -23,13 +23,16 @@ class WorkerServer(port: Int, outputDir: String) {
   private implicit val ec: ExecutionContext = ExecutionContext.global
   private val impl = new WorkerServiceImpl(outputDir)
 
-  def start(): Unit = {
+  def start(): Int = {
     server = ServerBuilder
       .forPort(port)
       .addService(WorkerServiceGrpc.bindService(impl, ec))
       .build()
       .start()
-    println(s"🔌 WorkerServer started on port $port")
+    val actualPort = server.getPort
+
+    println(s"🔌 WorkerServer started on port $actualPort")
+    actualPort
   }
 
   def blockUntilShutdown(): Unit = {

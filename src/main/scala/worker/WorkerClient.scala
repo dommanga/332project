@@ -204,7 +204,7 @@ object WorkerClient {
       val workerInfo = WorkerInfo(
         id = -1,
         ip = getLocalIP(),
-        port = 6000,
+        port = 0,  // Will be assigned by master
         inputDirs = conf.inputPaths,
         outputDir = conf.outputDir
       )
@@ -213,22 +213,19 @@ object WorkerClient {
 
       val assignment = masterClient.register(workerInfo)
 
-      println("=" * 60)
-      println(s"   ✅ Worker ${assignment.workerId} started")
-      println(s"      master: ${conf.masterAddr}")
-      println(s"      port: ${assignment.assignedPort}")
-      println("=" * 60)
+      println(s"Worker ${assignment.workerId} registered")
       
+      val workerServer = new WorkerServer(0, conf.outputDir)
+      val actualPort = workerServer.start()
+
       val updatedWorkerInfo = workerInfo.copy(
         id = assignment.workerId,
-        port = assignment.assignedPort
+        port = actualPort
       )
+
       WorkerState.setWorkerInfo(updatedWorkerInfo)
       WorkerState.setMasterClient(masterClient)
       
-      val workerServer = new WorkerServer(assignment.assignedPort, conf.outputDir)
-      workerServer.start()
-
       HeartbeatManager.start(updatedWorkerInfo, masterClient)
 
       if (hasSentCheckpoints(conf.outputDir)) {
@@ -243,6 +240,10 @@ object WorkerClient {
         
         HeartbeatManager.stop()
         masterClient.shutdown()
+        
+        // Cleanup temporary directories
+        cleanupTempDirectories(conf.outputDir)
+        
         println("💀 Worker shutting down...")
         return
       }
@@ -436,6 +437,9 @@ object WorkerClient {
           Console.err.println(s"⚠️ Shutdown error: ${e.getMessage}")
       }
 
+      // Cleanup temporary directories
+      cleanupTempDirectories(conf.outputDir)
+
       println("💀 Worker shutting down...")
         
     } catch {
@@ -490,6 +494,37 @@ object WorkerClient {
     tempFile.renameTo(finalFile)
   }
 
+  /**
+   * Cleanup temporary checkpoint directories
+   */
+  private def cleanupTempDirectories(outputDir: String): Unit = {
+    try {
+      val sentCheckpointDir = new java.io.File(s"$outputDir/sent-checkpoint")
+      val shuffleCheckpointDir = new java.io.File(s"$outputDir/shuffle-checkpoint")
+      
+      def deleteRecursively(file: java.io.File): Unit = {
+        if (file.isDirectory) {
+          file.listFiles().foreach(deleteRecursively)
+        }
+        file.delete()
+      }
+      
+      if (sentCheckpointDir.exists()) {
+        deleteRecursively(sentCheckpointDir)
+      }
+      
+      if (shuffleCheckpointDir.exists()) {
+        deleteRecursively(shuffleCheckpointDir)
+      }
+    } catch {
+      case e: Exception =>
+        Console.err.println(s"⚠️ Failed to cleanup temp directories: ${e.getMessage}")
+    }
+  }
+
+  // ---------------------------------------------------------
+  // CLI 입력 파서
+  // ---------------------------------------------------------
   private def parseArgs(args: Array[String]): Option[WorkerConfig] = {
     if (args.isEmpty) {
       printUsage()

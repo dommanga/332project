@@ -13,23 +13,18 @@ import io.grpc.stub.StreamObserver
  * ================================================================ */
 object MasterServer {
   def main(args: Array[String]): Unit = {
-    if (args.length < 1) {
+    if (args.length != 1) {
       println("Usage: master <num_workers>")
       System.exit(1)
     }
 
     val numWorkers = args(0).toInt
-    val port = 5100
+    val server = new MasterServer(0, numWorkers)
 
-    val server = new MasterServer(port, numWorkers)
-    server.start()
+    val actualPort = server.start()
 
     val localIP = getLocalIP()
-    println("=" * 60)
-    println(s"   Master Server Started")
-    println(s"   Address: $localIP:$port")
-    println(s"   Expected Workers: $numWorkers")
-    println("=" * 60)
+    println(s"$localIP:$actualPort")
 
     server.blockUntilShutdown()
   }
@@ -105,18 +100,20 @@ class MasterServer(port: Int, expectedWorkers: Int) {
   private var server: Server = _
   private implicit val ec: ExecutionContext = ExecutionContext.global
 
-  private val registry = new WorkerRegistry()
+  private val registry = new WorkerRegistry(expectedWorkers)
   private val sampling = new SamplingCoordinator(expectedWorkers)
   private val serviceImpl = new MasterServiceImpl(registry, sampling)
 
-  def start(): Unit = {
+  private var boundPort: Int = _
+
+  def start(): Int = {
     server = ServerBuilder
       .forPort(port)
       .addService(MasterServiceGrpc.bindService(serviceImpl, ec))
       .build()
       .start()
 
-    println("Server ready. Waiting for workers...\n")
+    boundPort = server.getPort
 
     // Worker timeout thread
     val pruneThread = new Thread {
@@ -138,6 +135,7 @@ class MasterServer(port: Int, expectedWorkers: Int) {
       println("Shutting down Master...")
       stop()
     }
+    boundPort
   }
 
   def stop(): Unit = server.shutdown()
@@ -217,11 +215,8 @@ class MasterServiceImpl(
     }
 
     if (registry.size == expectedWorkers) {
-      println("\n✅ All workers connected!")
-      registry.getAllWorkers.sortBy(_.id).foreach { w =>
-        println(s"   Worker ${w.id}: ${w.workerInfo.ip}")
-      }
-      println()
+      val workerIPs = registry.getAllWorkers.sortBy(_.id).map(_.workerInfo.ip)
+      println(workerIPs.mkString(", "))
     }
     assignment
   }
