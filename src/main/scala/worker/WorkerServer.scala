@@ -97,15 +97,16 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
   override def setPartitionPlan(plan: PartitionPlan): Future[Ack] = {
     // Worker 주소 정보 저장
+    WorkerState.setPartitionPlan(plan)
+
     if (plan.workers.nonEmpty) {
       val addresses: Map[Int, (String, Int)] = plan.workers.map { w =>
         w.workerId -> (w.ip, w.port)
       }.toMap
       
-      WorkerState.setWorkerAddresses(addresses)
+      WorkerState.setWorkerAddresses(addresses) // Important
     }
     
-    WorkerState.setPartitionPlan(plan)
     Future.successful(Ack(ok = true, msg = "Plan received"))
   }
 
