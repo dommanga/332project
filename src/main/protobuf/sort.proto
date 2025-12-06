@@ -103,6 +103,8 @@ service WorkerService {
   
   rpc RecoverPartitions(RecoveryRequest) returns (Ack);
   rpc RequestPartition(PartitionRequest) returns (stream PartitionChunk);
+
+  rpc Shutdown(TaskId) returns (Ack);
 }
 
 message WorkerStatus {

@@ -551,6 +551,16 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     }
   }
 
+  override def shutdown(taskId: TaskId): Future[Ack] = {
+    Future {
+      println(s"[Worker] 🛑 Received Shutdown command from Master")
+      
+      WorkerState.signalShutdown()
+      
+      Ack(ok = true, msg = "Shutdown acknowledged")
+    }
+  }
+
   /**
    * 단일 partition 복구
    */

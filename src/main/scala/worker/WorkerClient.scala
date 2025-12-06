@@ -454,22 +454,26 @@ object WorkerClient {
           Console.err.println("⚠️ This is non-fatal - work already completed")
       }
 
-      println("⏳ Waiting for finalize command from Master...")
-
       FaultInjector.checkAndCrash("before-finalize")
 
       WorkerState.awaitFinalizeComplete()
 
+      println("✅ Worker work completed")
+      println("⏳ Waiting for shutdown command from Master...")
+
+      WorkerState.awaitShutdownCommand()
+
       HeartbeatManager.stop()
-      
+
       try {
         masterClient.shutdown()
       } catch {
         case e: Exception =>
           Console.err.println(s"⚠️ Failed to shutdown master client: ${e.getMessage}")
       }
+
+      println("💀 Worker shutting down...")
         
-      println("✅ Worker completed successfully")    
     } catch {
       case e: Exception =>
         Console.err.println(s"❌ Worker error: ${e.getMessage}")

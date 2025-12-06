@@ -13,6 +13,7 @@ object WorkerState {
   
   private var _shuffleReport: Option[ShuffleCompletionReport] = None
   private val finalizeLatch = new CountDownLatch(1)
+  private val shutdownLatch = new CountDownLatch(1)
 
   /**
    * PartitionPlan이 없으면 대기
@@ -164,5 +165,13 @@ object WorkerState {
 
   def awaitFinalizeComplete(): Unit = {
     finalizeLatch.await()
+  }
+  // ===== Shutdown 관련 =====
+  def signalShutdown(): Unit = {
+    shutdownLatch.countDown()
+  }
+
+  def awaitShutdownCommand(): Unit = {
+    shutdownLatch.await()
   }
 }

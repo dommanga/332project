@@ -323,7 +323,9 @@ class MasterServiceImpl(
       println(s"[Master]    Response: ${ack.msg}")
       
       channel.shutdown()
-      
+
+      println(s"[Master] ℹ️  Marking Worker $workerId as merge complete after recovery")
+      ShuffleTracker.markMergeComplete(workerId)
     } catch {
       case e: Exception =>
         Console.err.println(s"[Master] ❌ Failed to send recovery: ${e.getMessage}")
@@ -394,6 +396,8 @@ class MasterServiceImpl(
     ShuffleTracker.markMergeComplete(status.workerId)
 
     if (ShuffleTracker.isAllMergeComplete) {
+      broadcastShutdown()
+
       println("[Master] 🎉 All work complete! Shutting down in 3 seconds...")
       Future {
         Thread.sleep(3000)  // Worker들의 마지막 응답 전송 대기
@@ -431,6 +435,28 @@ class MasterServiceImpl(
       println(s"  Worker${w.id} finalize = ${ack.msg}")
 
       ch.shutdown()
+    }
+  }
+
+  private def broadcastShutdown(): Unit = {
+    println("[Master] Broadcasting shutdown command to all workers...")
+    
+    registry.getAllWorkers.foreach { w =>
+      try {
+        val ch = ManagedChannelBuilder
+          .forAddress(w.workerInfo.ip, w.workerInfo.port)
+          .usePlaintext()
+          .build()
+        
+        val stub = WorkerServiceGrpc.blockingStub(ch)
+        val ack = stub.shutdown(TaskId("shutdown"))
+        println(s"  Worker${w.id} shutdown = ${ack.msg}")
+        
+        ch.shutdown()
+      } catch {
+        case e: Exception =>
+          Console.err.println(s"  Worker${w.id} shutdown failed: ${e.getMessage}")
+      }
     }
   }
 }
