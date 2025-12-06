@@ -20,45 +20,34 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
 
   /** Worker 등록 */
   def register(workerInfo: WorkerInfo): WorkerAssignment = {
-    println(s"🔌 Connecting to Master at $host:$port...")
-    val response = blockingStub.registerWorker(workerInfo)
-    println(s"Registered as Worker #${response.workerId}")
-    response
+    blockingStub.registerWorker(workerInfo)
   }
 
   /** Heartbeat 전송 */
   def sendHeartbeat(workerInfo: WorkerInfo): Unit = {
-    val ack = blockingStub.heartbeat(workerInfo)
-    if (ack.ok) {
-      println(s"Heartbeat sent")
-    }
+    blockingStub.heartbeat(workerInfo)
   }
 
   /** 샘플 전송 (Client Streaming) */
   def sendSamples(samples: Seq[Array[Byte]]): Splitters = {
-    println(s"Sending ${samples.size} samples to Master...")
+    println(s"📊 Sending ${samples.size} samples to Master...")
 
     val promise = Promise[Splitters]()
 
-    // 응답을 받을 Observer
     val responseObserver = new StreamObserver[Splitters] {
       override def onNext(splitters: Splitters): Unit = {
         promise.success(splitters)
       }
       override def onError(t: Throwable): Unit = {
-        Console.err.println(s"Error receiving splitters: ${t.getMessage}")
+        Console.err.println(s"❌ Error receiving splitters: ${t.getMessage}")
         promise.failure(t)
       }
-      override def onCompleted(): Unit = {
-        println("Splitters received from Master")
-      }
+      override def onCompleted(): Unit = {}
     }
 
-    // 샘플을 보낼 Observer
     val requestObserver = asyncStub.sendSamples(responseObserver)
 
     try {
-      // 샘플 스트리밍 전송
       samples.foreach { keyBytes =>
         val sample = Sample(
           key = com.google.protobuf.ByteString.copyFrom(keyBytes)
@@ -66,10 +55,8 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
         requestObserver.onNext(sample)
       }
 
-      // 전송 완료
       requestObserver.onCompleted()
 
-      // 응답 대기 (최대 30초)
       import scala.concurrent.Await
       Await.result(promise.future, 120.seconds)
 
@@ -82,28 +69,26 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
 
   def reportShuffleComplete(report: ShuffleCompletionReport): Unit = {
     try {
-      val ack = blockingStub
+      blockingStub
         .withDeadlineAfter(5, java.util.concurrent.TimeUnit.SECONDS)
         .reportShuffleComplete(report)
-      println(s"[MasterClient] Shuffle report sent: ${ack.msg}")
     } catch {
       case e: io.grpc.StatusRuntimeException =>
-        Console.err.println(s"[MasterClient] ⚠️ Report failed: ${e.getStatus}")
-        throw e  // Re-throw to be caught by caller
+        Console.err.println(s"⚠️ Shuffle report failed: ${e.getStatus}")
+        throw e
     }
   }
 
   def reportMergeComplete(workerId: Int): Unit = {
     try {
       val status = WorkerStatus(workerId = workerId)
-      val ack = blockingStub
+      blockingStub
         .withDeadlineAfter(5, java.util.concurrent.TimeUnit.SECONDS)
         .reportMergeComplete(status)
-      println(s"[MasterClient] Merge complete reported: ${ack.msg}")
     } catch {
       case e: io.grpc.StatusRuntimeException =>
-        Console.err.println(s"[MasterClient] ⚠️ Report failed: ${e.getStatus}")
-        throw e  // Re-throw to be caught by caller
+        Console.err.println(s"⚠️ Merge report failed: ${e.getStatus}")
+        throw e
     }
   }
 

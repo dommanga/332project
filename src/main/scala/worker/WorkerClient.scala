@@ -32,14 +32,13 @@ object WorkerClient {
       if (enabledPhases.contains(phase)) {
         val myId = WorkerState.getWorkerId
         
-        // 특정 worker만 죽이기
         if (targetWorkerId == -1 || targetWorkerId == myId) {
           Console.err.println(s"\n💥💥💥 [FAULT INJECTION] 💥💥💥💥💥💥💥💥💥")
           Console.err.println(s"💥 Worker $myId crashing at phase: $phase 💥")
           Console.err.println(s"💥 Terminating in 2 seconds...                 💥")
           Console.err.println(s"💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥\n")
           Thread.sleep(2000)
-          System.exit(137)  // Simulate kill -9
+          System.exit(137)
         }
       }
     }
@@ -67,7 +66,7 @@ object WorkerClient {
           while (!Thread.currentThread().isInterrupted) {
             try {
               masterClient.sendHeartbeat(workerInfo)
-              Thread.sleep(3000)
+              Thread.sleep(2000)
             } catch {
               case _: InterruptedException => return
               case e: Exception => 
@@ -99,33 +98,21 @@ object WorkerClient {
     
     if (records.isEmpty) return Vector.empty
     
-    println(s"🔧 Parallel sorting with $numThreads threads...")
+    println(s"🔧 Parallel sorting ${records.size} records with $numThreads threads...")
     
-    // Step 1: 데이터를 numThreads개 chunk로 분할
     val chunkSize = (records.size + numThreads - 1) / numThreads
     val chunks = records.grouped(chunkSize).toVector
-    println(s"   Split into ${chunks.size} chunks (avg ${chunkSize} records/chunk)")
     
-    // Step 2: 각 chunk를 병렬로 정렬
-    val sortedChunksFutures = chunks.zipWithIndex.map { case (chunk, idx) =>
+    val sortedChunksFutures = chunks.map { chunk =>
       Future {
-        println(s"   Thread $idx: sorting ${chunk.size} records...")
-        val sorted = chunk.sortWith { (a, b) =>
+        chunk.sortWith { (a, b) =>
           RecordIO.compareKeys(extractKey(a), extractKey(b)) < 0
         }
-        println(s"   Thread $idx: done")
-        sorted
       }
     }
     
     val sortedChunks = Await.result(Future.sequence(sortedChunksFutures), Duration.Inf)
-    println(s"   All chunks sorted, starting merge...")
-    
-    // Step 3: K-way merge
-    val merged = kWayMerge(sortedChunks.toList)
-    println(s"   Merge complete!")
-    
-    merged
+    kWayMerge(sortedChunks.toList)
   }
 
   /**
@@ -134,7 +121,6 @@ object WorkerClient {
   private def kWayMerge(chunks: List[Vector[Array[Byte]]]): Vector[Array[Byte]] = {
     case class ChunkIter(var current: Array[Byte], it: Iterator[Array[Byte]], chunkId: Int)
     
-    // Min-heap (Scala의 PriorityQueue는 max-heap이라 반전)
     implicit val chunkOrdering: Ordering[ChunkIter] =
       Ordering.fromLessThan[ChunkIter] { (x, y) =>
         RecordIO.compareKeys(extractKey(x.current), extractKey(y.current)) > 0
@@ -142,7 +128,6 @@ object WorkerClient {
     
     val pq = scala.collection.mutable.PriorityQueue.empty[ChunkIter]
     
-    // 각 chunk의 첫 요소를 PQ에 넣기
     chunks.zipWithIndex.foreach { case (chunk, idx) =>
       val it = chunk.iterator
       if (it.hasNext) {
@@ -202,11 +187,11 @@ object WorkerClient {
 
     implicit val ec: ExecutionContext = ExecutionContext.global
 
-    // Shutdown Hook
     sys.addShutdownHook {
       println("🛑 Shutting down worker...")
       HeartbeatManager.stop()
     }
+    
     try {
       val conf = parseArgs(args) match {
         case Some(c) => c
@@ -224,20 +209,15 @@ object WorkerClient {
         outputDir = conf.outputDir
       )
       
-      val masterClient = new MasterClient(masterAddr(0), masterAddr(1).toInt)(
-        scala.concurrent.ExecutionContext.global
-      )
+      val masterClient = new MasterClient(masterAddr(0), masterAddr(1).toInt)
 
       val assignment = masterClient.register(workerInfo)
 
-      println("=============================================")
-      println("   ✅ Worker started with master assignment")
-      println(s"      master   = ${conf.masterAddr}")
-      println(s"      inputs   = ${conf.inputPaths.mkString(", ")}")
-      println(s"      output   = ${conf.outputDir}")
-      println(s"      id       = ${assignment.workerId}")
-      println(s"      port     = ${assignment.assignedPort}")
-      println("=============================================")
+      println("=" * 60)
+      println(s"   ✅ Worker ${assignment.workerId} started")
+      println(s"      master: ${conf.masterAddr}")
+      println(s"      port: ${assignment.assignedPort}")
+      println("=" * 60)
       
       val updatedWorkerInfo = workerInfo.copy(
         id = assignment.workerId,
@@ -248,19 +228,17 @@ object WorkerClient {
       
       val workerServer = new WorkerServer(assignment.assignedPort, conf.outputDir)
       workerServer.start()
-      println(s"🔌 WorkerServer started on port ${assignment.assignedPort}")
 
       HeartbeatManager.start(updatedWorkerInfo, masterClient)
 
       if (hasSentCheckpoints(conf.outputDir)) {
         Thread.sleep(2000)
-        // Checkpoint 있음 = 이미 shuffle 완료했었음
-        println("🔄 Recovery mode: checkpoints found, waiting for finalize...")
+        println("🔄 Recovery mode: waiting for finalize...")
         
         WorkerState.awaitFinalizeComplete()
         
         println("✅ Worker work completed")
-        println("⏳ Waiting for shutdown command from Master...")
+        println("⏳ Waiting for shutdown...")
         WorkerState.awaitShutdownCommand()
         
         HeartbeatManager.stop()
@@ -269,50 +247,35 @@ object WorkerClient {
         return
       }
 
-      // ---------------------------------------------------------
       // Sampling
-      // ---------------------------------------------------------
       val samples = common.Sampling.uniformEveryN(conf.inputPaths, everyN = 1000)
-      println(s"➡️  collected ${samples.size} sample keys")
+      println(s"📊 Collected ${samples.size} samples")
 
       FaultInjector.checkAndCrash("after-sampling")
 
-      // ---------------------------------------------------------
-      // Splitters creation
-      // ---------------------------------------------------------
       masterClient.sendSamples(samples)
-      println(s"✅  Sampling phase complete")
+      println(s"✅ Sampling complete")
 
-      // ---------------------------------------------------------
       // Load and Sort
-      // ---------------------------------------------------------
       val allRecords: Vector[Array[Byte]] =
         conf.inputPaths.flatMap(path => readAll(path)).toVector
 
-      println(s"📦 Loaded total ${allRecords.size} records")
+      println(s"📦 Loaded ${allRecords.size} records")
 
-      // Parallel sorting
       val sorted = parallelSort(allRecords, numThreads = 4)
-      println("🔑 Local sorting completed")
+      println("✅ Local sorting completed")
 
       FaultInjector.checkAndCrash("after-sort")
 
-      // ---------------------------------------------------------
       // Partitioning
-      // ---------------------------------------------------------
       val splitterKeys: Array[Array[Byte]] = WorkerState.getSplitters
-      println(s"🔑 Loaded ${splitterKeys.length} splitters from PartitionPlan")
+      val partitioned = sorted.groupBy(rec => WorkerState.findPartitionId(extractKey(rec)))
 
-      val partitioned =
-        sorted.groupBy(rec => WorkerState.findPartitionId(extractKey(rec)))
-
-      println(s"🧩 Partitioning complete → partitions=${partitioned.size}")
+      println(s"🧩 Partitioned into ${partitioned.size} partitions")
 
       FaultInjector.checkAndCrash("after-partition")
 
-      // ---------------------------------------------------------
       // Shuffle
-      // ---------------------------------------------------------
       val workerAddresses = WorkerState.getWorkerAddresses.getOrElse {
         throw new RuntimeException("Worker addresses not available")
       }
@@ -330,7 +293,6 @@ object WorkerClient {
         while (attempt < maxRetries) {              
           try {
             val (targetIp, targetPort) = workerAddresses(originalTarget)
-            println(s"  Attempt ${attempt+1}/$maxRetries: p$partitionId → worker#$originalTarget ($targetIp:$targetPort)")
             
             val channel = ManagedChannelBuilder
               .forAddress(targetIp, targetPort)
@@ -338,21 +300,17 @@ object WorkerClient {
               .build()
 
             try {
-            
               val stub = WorkerServiceGrpc.stub(channel)
               val ackPromise = scala.concurrent.Promise[Unit]()
               
               val responseObserver = new StreamObserver[Ack] {
-                override def onNext(v: Ack): Unit =
-                  println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
+                override def onNext(v: Ack): Unit = ()
                 
                 override def onError(t: Throwable): Unit = {
-                  println(s"    ✗ Error: ${t.getMessage}")
                   ackPromise.failure(t)
                 }
                 
                 override def onCompleted(): Unit = {
-                  println(s"    ✓ Completed p$partitionId")
                   ackPromise.success(())
                 }
               }
@@ -376,7 +334,6 @@ object WorkerClient {
               Await.result(ackPromise.future, 30.seconds)
               channel.shutdown()
               
-              println(s"  ✅ p$partitionId sent successfully")
               return true
 
             } finally {
@@ -388,12 +345,10 @@ object WorkerClient {
               attempt += 1
               
               if (attempt < maxRetries) {
-                val backoff = 3000 * attempt  // 3s, 6s, 9s, 12s, 15s
-                println(s"  ⚠️ Send failed, retry after ${backoff}ms: ${e.getMessage}")
+                val backoff = 3000 * attempt
                 Thread.sleep(backoff)
               } else {
-                Console.err.println(s"  ❌ Failed to send p$partitionId after $maxRetries attempts")
-                Console.err.println(s"  ℹ️  Will report partial completion to Master")
+                Console.err.println(s"❌ Failed to send p$partitionId after $maxRetries attempts")
                 return false
               }
           }
@@ -402,21 +357,15 @@ object WorkerClient {
         false
       }
 
-      println("-------------------------------------------------------")
-      println("     🚚 Starting Shuffle: worker → worker (PARALLEL)")
-      println("-------------------------------------------------------")
+      println("🚚 Starting shuffle...")
 
       try {      
         val maxParallel = 4
-
-        // Partition을 4개씩 묶어서 처리
         val batches = partitioned.toSeq.grouped(maxParallel).toSeq
         
-        println(s"  📦 Total ${partitioned.size} partitions in ${batches.size} batches")
+        println(s"📦 Sending ${partitioned.size} partitions in ${batches.size} batches")
         
         batches.zipWithIndex.foreach { case (batch, batchIdx) =>
-          println(s"  🔄 Batch ${batchIdx + 1}/${batches.size}: partitions ${batch.map(_._1).mkString(", ")}")
-
           if (batchIdx == batches.size / 2) {
             FaultInjector.checkAndCrash("mid-shuffle")
           }
@@ -430,27 +379,21 @@ object WorkerClient {
             }
           }
           
-          // 이번 batch 완료 대기
           val results = Await.result(Future.sequence(batchFutures), 120.seconds)
           val (successes, failures) = results.partition(_._2)
 
-          println(s"  ✅ Batch ${batchIdx + 1}: ${successes.size} sent, ${failures.size} failed")
           if (failures.nonEmpty) {
-            println(s"  ⚠️  Failed partitions: ${failures.map(_._1).mkString(", ")} (will recover later)")
+            println(s"⚠️  Batch ${batchIdx + 1}: ${failures.size} failed (will recover)")
           }
         }
 
       } catch {
         case e: Exception =>
-          Console.err.println(s"⚠️ Shuffle encountered errors: ${e.getMessage}")
+          Console.err.println(s"⚠️ Shuffle errors: ${e.getMessage}")
           e.printStackTrace()
       }
 
-      println("-------------------------------------------------------")
-      println("       🎉 Shuffle Completed (with possible failures)")
-      println("-------------------------------------------------------")
-
-      println("Shuffle completed, reporting to Master...")
+      println("✅ Shuffle completed")
 
       val sendRecords = partitioned.keys.map { pid =>
         val target = WorkerState.getPartitionTargetWorker(pid)
@@ -472,17 +415,15 @@ object WorkerClient {
 
       try {
         WorkerState.reportShuffleComplete()
-        println("Shuffle report sent to Master")
       } catch {
         case e: Exception =>
-          Console.err.println(s"⚠️ Failed to report shuffle completion: ${e.getMessage}")
-          Console.err.println("⚠️ This is non-fatal - work already completed")
+          Console.err.println(s"⚠️ Failed to report shuffle: ${e.getMessage}")
       }
 
       WorkerState.awaitFinalizeComplete()
 
       println("✅ Worker work completed")
-      println("⏳ Waiting for shutdown command from Master...")
+      println("⏳ Waiting for shutdown...")
 
       WorkerState.awaitShutdownCommand()
 
@@ -492,7 +433,7 @@ object WorkerClient {
         masterClient.shutdown()
       } catch {
         case e: Exception =>
-          Console.err.println(s"⚠️ Failed to shutdown master client: ${e.getMessage}")
+          Console.err.println(s"⚠️ Shutdown error: ${e.getMessage}")
       }
 
       println("💀 Worker shutting down...")
@@ -526,7 +467,7 @@ object WorkerClient {
   }
 
   /**
-   * Sender checkpoint 저장 (Atomic write)
+   * Sender checkpoint 저장
    */
   private def checkpointSentPartition(
     partitionId: Int, 
@@ -547,13 +488,8 @@ object WorkerClient {
     val finalFile = new java.io.File(checkpointDir, s"sent_p${partitionId}.dat")
     if (finalFile.exists()) finalFile.delete()
     tempFile.renameTo(finalFile)
-    
-    println(s"  💾 Checkpointed sent_p${partitionId}: ${records.size} records")
   }
 
-  // ---------------------------------------------------------
-  // CLI 입력 파서
-  // ---------------------------------------------------------
   private def parseArgs(args: Array[String]): Option[WorkerConfig] = {
     if (args.isEmpty) {
       printUsage()

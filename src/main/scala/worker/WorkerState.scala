@@ -15,12 +15,9 @@ object WorkerState {
   private val finalizeLatch = new CountDownLatch(1)
   private val shutdownLatch = new CountDownLatch(1)
 
-  /**
-   * PartitionPlan이 없으면 대기
-   */
   private def ensurePartitionPlan(): Unit = {
     if (_partitionPlan.isEmpty) {
-      println("[WorkerState] ⚠️ PartitionPlan not received yet, waiting...")
+      println("⚠️  Waiting for PartitionPlan from Master...")
 
       val deadline = System.nanoTime() + 120_000_000_000L
       
@@ -30,29 +27,22 @@ object WorkerState {
 
       if (_partitionPlan.isEmpty) {
         throw new RuntimeException(
-          "Timeout waiting for PartitionPlan from Master! " +
-          "Master may have failed or network issue occurred."
+          "Timeout waiting for PartitionPlan from Master!"
         )
       }
-
-      println("[WorkerState] ✅ PartitionPlan received")
     }
   }
 
-  // ===== WorkerInfo 관련 =====
   def setWorkerInfo(info: WorkerInfo): Unit = {
     _workerInfo = Some(info)
-    println(s"[WorkerState] Stored WorkerInfo: id=${info.id}, port=${info.port}")
   }
 
   def getWorkerInfo: Option[WorkerInfo] = _workerInfo
 
-  // Convenience getters
   def getWorkerId: Int = _workerInfo.map(_.id.toInt).getOrElse(-1)
   
   def getInputPaths: Seq[String] = _workerInfo.map(_.inputDirs).getOrElse(Seq.empty)
 
-  // ===== MasterClient 관련 =====
   def setMasterClient(client: MasterClient): Unit = {
     _masterClient = Some(client)
   }
@@ -63,17 +53,14 @@ object WorkerState {
     }
   }
 
-  // ===== Worker Addresses 관련 =====
   def setWorkerAddresses(addresses: Map[Int, (String, Int)]): Unit = {
     _workerAddresses = Some(addresses)
-    println(s"[WorkerState] Stored ${addresses.size} worker addresses")
   }
 
   def getWorkerAddresses: Option[Map[Int, (String, Int)]] = _workerAddresses
 
   def setPartitionPlan(plan: PartitionPlan): Unit = {
     _partitionPlan = Some(plan)
-    println(s"[WorkerState] Stored partition plan with ${plan.ranges.size} ranges")
   }
 
   def getPartitionTargetWorker(partitionId: Int): Int = {
@@ -113,11 +100,10 @@ object WorkerState {
     
     _partitionPlan match {
       case Some(plan) =>
-        // ranges에서 hi 값 추출 (마지막 range 제외)
         plan.ranges.dropRight(1).map(_.hi.toByteArray).toArray
       
       case None =>
-        throw new RuntimeException("PartitionPlan not available - cannot extract splitters!")
+        throw new RuntimeException("PartitionPlan not available!")
     }
   }
 
@@ -130,35 +116,30 @@ object WorkerState {
     idx
   }
 
-  // ===== Shuffle Report 관련 =====
   def setShuffleReport(report: ShuffleCompletionReport): Unit = {
     _shuffleReport = Some(report)
-    println(s"[WorkerState] Shuffle report stored: ${report.sendRecords.size} records")
   }
 
   def reportShuffleComplete(): Unit = {
     (_masterClient, _shuffleReport) match {
       case (Some(client), Some(report)) =>
         client.reportShuffleComplete(report)
-        println(s"[WorkerState] Shuffle report sent to Master")
       case (None, _) =>
-        System.err.println("[WorkerState] MasterClient not set!")
+        System.err.println("❌ MasterClient not set!")
       case (_, None) =>
-        System.err.println("[WorkerState] Shuffle report not set!")
+        System.err.println("❌ Shuffle report not set!")
     }
   }
 
-  // ===== Merge Complete 관련 =====
   def reportMergeComplete(): Unit = {
     _masterClient match {
       case Some(client) =>
         client.reportMergeComplete(getWorkerId)
       case None =>
-        System.err.println("[WorkerState] MasterClient not set!")
+        System.err.println("❌ MasterClient not set!")
     }
   }
 
-  // ===== Finalize 관련 =====
   def signalFinalizeComplete(): Unit = {
     finalizeLatch.countDown()
   }
@@ -166,7 +147,7 @@ object WorkerState {
   def awaitFinalizeComplete(): Unit = {
     finalizeLatch.await()
   }
-  // ===== Shutdown 관련 =====
+
   def signalShutdown(): Unit = {
     shutdownLatch.countDown()
   }

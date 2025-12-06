@@ -10,14 +10,27 @@ MASTER_IP="2.2.2.254"
 MASTER_PORT="5100"
 RECORDS_PER_WORKER=100000
 
-DEFAULT_NUM_WORKERS=2
+DEFAULT_NUM_WORKERS=3
 
 # ALL_WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
-ALL_WORKERS=("vm18" "vm19")
+ALL_WORKERS=("vm17" "vm18" "vm19")
 
 # ============================================
 # 함수 정의
 # ============================================
+
+reclone_workers() {
+  echo "=== Re-cloning project on all workers (rm -rf + git clone) ==="
+  for host in "${WORKERS[@]}"; do
+    echo "→ $host"
+    ssh $host "
+      rm -rf $PROJECT_DIR && \
+      git clone https://github.com/dommanga/332project.git $PROJECT_DIR && \
+      mkdir -p $DATA_INPUT $DATA_OUTPUT
+    "
+  done
+  echo "✅ Re-clone complete"
+}
 
 get_workers() {
   local num=$1
@@ -108,6 +121,7 @@ usage() {
   echo "Usage: $0 <command> [num_workers]"
   echo ""
   echo "Commands:"
+  echo "  reclone     - Remove project dir and fresh git clone on all workers"
   echo "  init        - Initial setup (git clone, mkdir)"
   echo "  update      - Git pull && sbt compile on all workers"
   echo "  gensort     - Deploy gensort and valsort binaries to workers"
@@ -138,6 +152,9 @@ get_workers $NUM_WORKERS
 # 명령어 실행
 # ============================================
 case "$1" in
+  reclone)
+    reclone_workers
+    ;;
   init)
     init_workers
     ;;

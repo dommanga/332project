@@ -4,7 +4,7 @@ import rpc.sort._
 import java.time.Instant
 import scala.collection.mutable
 
-/** Worker state (Week7) */
+/** Worker state */
 object WorkerPhase extends Enumeration {
   type WorkerPhase = Value
   val ALIVE, DEAD = Value
@@ -31,18 +31,17 @@ class WorkerRegistry {
     
     val workerId = existingWorker match {
       case Some((id, w)) if w.phase == DEAD =>
-        println(s"[Registry] Worker at ${info.ip} rejoining with original ID $id")
+        println(s"🔄 Worker ${info.ip} rejoining with ID $id")
         id
         
       case Some((id, w)) if w.phase == ALIVE =>
-        println(s"[Registry] Worker at ${info.ip} re-registering with ID $id (was ALIVE)")
         id
         
       case None =>
         val id = nextId
         nextId += 1
-        println(s"[Registry] New worker at ${info.ip} assigned ID $id")
         id
+        
       case _ =>
         throw new RuntimeException("Unexpected state in worker registration")
     }
@@ -71,7 +70,7 @@ class WorkerRegistry {
     workers.get(info.id) match {
       case Some(w) =>
         workers(info.id) = w.copy(lastHeartbeat = Instant.now(), phase = ALIVE)
-        Ack(ok = true, msg = s"Heartbeat updated for worker ${info.id}")
+        Ack(ok = true, msg = "OK")
       
       case None =>
         Ack(ok = false, msg = s"Unknown worker: ${info.id}")
@@ -97,10 +96,9 @@ class WorkerRegistry {
 
   /**
    * Check dead workers and run callback
-   * callback(deadWorkerId) is executed for each dead worker
    */
   def pruneDeadWorkers(
-      timeoutSeconds: Int = 10
+      timeoutSeconds: Int = 5
     )(onDead: Int => Unit = _ => ()): Unit = synchronized {
 
     val now = Instant.now()
@@ -109,7 +107,7 @@ class WorkerRegistry {
       val diff = java.time.Duration.between(w.lastHeartbeat, now).getSeconds
 
       if (diff > timeoutSeconds && w.phase != DEAD) {
-        Console.err.println(s"[Registry] Worker $id DEAD (no heartbeat for $diff s)")
+        println(s"💀 Worker $id DEAD (no heartbeat for ${diff}s)")
         markDead(id)
         onDead(id)
       }
