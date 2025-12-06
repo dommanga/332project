@@ -231,31 +231,6 @@ object WorkerClient {
       println("🔑 Local sorting completed")
 
       // ---------------------------------------------------------
-      // Wait for PartitionPlan
-      // ---------------------------------------------------------
-      println("⏳ Waiting for PartitionPlan with worker addresses...")
-      
-      // WorkerServer의 PlanStore에서 Plan을 받을 때까지 대기
-      var workerAddresses: Map[Int, (String, Int)] = Map.empty
-      val planDeadline = System.nanoTime() + 60_000_000_000L // 60초 대기
-      
-      while (workerAddresses.isEmpty && System.nanoTime() < planDeadline) {
-        Thread.sleep(100)
-        // WorkerServer에서 저장한 Plan 확인
-        WorkerState.getWorkerAddresses match {
-          case Some(addrs) if addrs.nonEmpty =>
-            workerAddresses = addrs
-            println(s"📋 Received worker addresses: ${addrs.map { case (id, (ip, port)) => s"$id->$ip:$port" }.mkString(", ")}")
-          case _ =>
-            // 아직 Plan 미수신
-        }
-      }
-      
-      if (workerAddresses.isEmpty) {
-        throw new RuntimeException("Timeout waiting for PartitionPlan with worker addresses")
-      }
-
-      // ---------------------------------------------------------
       // Partitioning
       // ---------------------------------------------------------
       val splitterKeys: Array[Array[Byte]] = WorkerState.getSplitters
@@ -278,6 +253,10 @@ object WorkerClient {
       // ---------------------------------------------------------
       // Shuffle
       // ---------------------------------------------------------
+      val workerAddresses = WorkerState.getWorkerAddresses.getOrElse {
+        throw new RuntimeException("Worker addresses not available")
+      }
+      
       def sendPartitionWithRetry(
         originalTarget: Int,
         partitionId: Int,
