@@ -213,7 +213,9 @@ object WorkerClient {
       val workerInfo = WorkerInfo(
         id = -1,
         ip = getLocalIP(),
-        port = 6000   // Default
+        port = 6000,
+        inputDirs = conf.inputPaths,
+        outputDir = conf.outputDir
       )
       
       val masterClient = new MasterClient(masterAddr(0), masterAddr(1).toInt)(
@@ -320,46 +322,52 @@ object WorkerClient {
               .forAddress(targetIp, targetPort)
               .usePlaintext()
               .build()
+
+            try {
             
-            val stub = WorkerServiceGrpc.stub(channel)
-            val ackPromise = scala.concurrent.Promise[Unit]()
-            
-            val responseObserver = new StreamObserver[Ack] {
-              override def onNext(v: Ack): Unit =
-                println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
+              val stub = WorkerServiceGrpc.stub(channel)
+              val ackPromise = scala.concurrent.Promise[Unit]()
               
-              override def onError(t: Throwable): Unit = {
-                println(s"    ✗ Error: ${t.getMessage}")
-                ackPromise.failure(t)
+              val responseObserver = new StreamObserver[Ack] {
+                override def onNext(v: Ack): Unit =
+                  println(s"    ✓ ACK from worker#$originalTarget: ${v.msg}")
+                
+                override def onError(t: Throwable): Unit = {
+                  println(s"    ✗ Error: ${t.getMessage}")
+                  ackPromise.failure(t)
+                }
+                
+                override def onCompleted(): Unit = {
+                  println(s"    ✓ Completed p$partitionId")
+                  ackPromise.success(())
+                }
               }
               
-              override def onCompleted(): Unit = {
-                println(s"    ✓ Completed p$partitionId")
-                ackPromise.success(())
+              val requestObserver = stub.pushPartition(responseObserver)
+              
+              var seq: Long = 0
+              records.foreach { rec =>
+                val chunk = PartitionChunk(
+                  task = Some(TaskId("task-001")),
+                  partitionId = s"p$partitionId",
+                  senderId = WorkerState.getWorkerId,
+                  payload = ByteString.copyFrom(rec),
+                  seq = seq
+                )
+                seq += 1
+                requestObserver.onNext(chunk)
               }
+              
+              requestObserver.onCompleted()
+              Await.result(ackPromise.future, 30.seconds)
+              channel.shutdown()
+              
+              println(s"  ✅ p$partitionId sent successfully")
+              return true
+
+            } finally {
+              channel.shutdown()
             }
-            
-            val requestObserver = stub.pushPartition(responseObserver)
-            
-            var seq: Long = 0
-            records.foreach { rec =>
-              val chunk = PartitionChunk(
-                task = Some(TaskId("task-001")),
-                partitionId = s"p$partitionId",
-                senderId = WorkerState.getWorkerId,
-                payload = ByteString.copyFrom(rec),
-                seq = seq
-              )
-              seq += 1
-              requestObserver.onNext(chunk)
-            }
-            
-            requestObserver.onCompleted()
-            Await.result(ackPromise.future, 30.seconds)
-            channel.shutdown()
-            
-            println(s"  ✅ p$partitionId sent successfully")
-            return true
             
           } catch {
             case e: Exception =>
