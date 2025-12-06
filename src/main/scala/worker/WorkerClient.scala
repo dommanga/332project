@@ -444,9 +444,16 @@ object WorkerClient {
         sendRecords = sendRecords
       )
       WorkerState.setShuffleReport(report)
-      WorkerState.reportShuffleComplete()
 
-      println("Shuffle report sent to Master")
+      try {
+        WorkerState.reportShuffleComplete()
+        println("Shuffle report sent to Master")
+      } catch {
+        case e: Exception =>
+          Console.err.println(s"⚠️ Failed to report shuffle completion: ${e.getMessage}")
+          Console.err.println("⚠️ This is non-fatal - work already completed")
+      }
+
       println("⏳ Waiting for finalize command from Master...")
 
       FaultInjector.checkAndCrash("before-finalize")
@@ -454,7 +461,14 @@ object WorkerClient {
       WorkerState.awaitFinalizeComplete()
 
       HeartbeatManager.stop()
-      masterClient.shutdown()
+      
+      try {
+        masterClient.shutdown()
+      } catch {
+        case e: Exception =>
+          Console.err.println(s"⚠️ Failed to shutdown master client: ${e.getMessage}")
+      }
+        
       println("✅ Worker completed successfully")    
     } catch {
       case e: Exception =>

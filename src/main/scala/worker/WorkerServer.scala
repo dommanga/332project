@@ -454,7 +454,14 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   }
 
   private def reportMergeCompleteToMaster(): Unit = {
-    WorkerState.reportMergeComplete()
+    try {
+      WorkerState.reportMergeComplete()
+      println("[Worker] ✅ Merge completion reported to Master")
+    } catch {
+      case e: Exception =>
+        Console.err.println(s"[Worker] ⚠️ Failed to report merge completion: ${e.getMessage}")
+        Console.err.println("[Worker] ⚠️ This is non-fatal - partitions already written to disk")
+    }
   }
 
   override def recoverPartitions(request: RecoveryRequest): Future[Ack] = {
@@ -548,6 +555,12 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
    * 단일 partition 복구
    */
   private def recoverPartition(partitionId: Int): Unit = {
+    val finalFile = new java.io.File(s"$outputDir/partition.$partitionId")
+    if (finalFile.exists() && finalFile.length() > 0) {
+      println(s"[Worker] ✅ p$partitionId already finalized, skipping recovery")
+      return
+    }
+    
     println(s"[Worker] Recovering partition p$partitionId...")
     
     // Step 1: 자기 sent checkpoint 확인

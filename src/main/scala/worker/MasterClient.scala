@@ -81,18 +81,30 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
   }
 
   def reportShuffleComplete(report: ShuffleCompletionReport): Unit = {
-    val ack = blockingStub.reportShuffleComplete(report)
-    println(s"[MasterClient] Shuffle report sent: ${ack.msg}")
+    try {
+      val ack = blockingStub
+        .withDeadlineAfter(5, java.util.concurrent.TimeUnit.SECONDS)
+        .reportShuffleComplete(report)
+      println(s"[MasterClient] Shuffle report sent: ${ack.msg}")
+    } catch {
+      case e: io.grpc.StatusRuntimeException =>
+        Console.err.println(s"[MasterClient] ⚠️ Report failed: ${e.getStatus}")
+        throw e  // Re-throw to be caught by caller
+    }
   }
 
   def reportMergeComplete(workerId: Int): Unit = {
-    val status = WorkerStatus(
-      workerId = workerId,
-      phase = "merge_complete",
-      timestamp = System.currentTimeMillis()
-    )
-    val ack = blockingStub.reportMergeComplete(status)
-    println(s"[MasterClient] Merge complete reported: ${ack.msg}")
+    try {
+      val status = WorkerStatus(workerId = workerId)
+      val ack = blockingStub
+        .withDeadlineAfter(5, java.util.concurrent.TimeUnit.SECONDS)
+        .reportMergeComplete(status)
+      println(s"[MasterClient] Merge complete reported: ${ack.msg}")
+    } catch {
+      case e: io.grpc.StatusRuntimeException =>
+        Console.err.println(s"[MasterClient] ⚠️ Report failed: ${e.getStatus}")
+        throw e  // Re-throw to be caught by caller
+    }
   }
 
   def queryPartitionSenders(partitionId: Int): Seq[Int] = {
