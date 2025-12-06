@@ -70,11 +70,11 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
   def reportShuffleComplete(report: ShuffleCompletionReport): Unit = {
     try {
       blockingStub
-        .withDeadlineAfter(5, java.util.concurrent.TimeUnit.SECONDS)
+        .withDeadlineAfter(15, java.util.concurrent.TimeUnit.SECONDS)
         .reportShuffleComplete(report)
     } catch {
       case e: io.grpc.StatusRuntimeException =>
-        Console.err.println(s"⚠️ Shuffle report failed: ${e.getStatus}")
+        Console.err.println(s"⚠️ Non-fatal: Shuffle report failed: ${e.getStatus}")
         throw e
     }
   }
@@ -83,11 +83,11 @@ class MasterClient(host: String, port: Int)(implicit ec: ExecutionContext) {
     try {
       val status = WorkerStatus(workerId = workerId)
       blockingStub
-        .withDeadlineAfter(5, java.util.concurrent.TimeUnit.SECONDS)
+        .withDeadlineAfter(15, java.util.concurrent.TimeUnit.SECONDS)
         .reportMergeComplete(status)
     } catch {
       case e: io.grpc.StatusRuntimeException =>
-        Console.err.println(s"⚠️ Merge report failed: ${e.getStatus}")
+        Console.err.println(s"⚠️ Non-fatal: Merge report failed: ${e.getStatus}")
         throw e
     }
   }
