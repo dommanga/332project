@@ -397,7 +397,7 @@ object WorkerClient {
       println("Shuffle completed, reporting to Master...")
 
       val sendRecords = partitioned.map { case (pid, _) =>
-        val target = pid % workerAddresses.size
+        val target = WorkerState.getPartitionTargetWorker(pid)
         PartitionSendRecord(
           partitionId = pid,
           targetWorkerId = target,

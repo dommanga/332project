@@ -374,7 +374,10 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     val numPartitions = plan.get.ranges.size
     
     // 내가 받아야 하는 partitions
-    val expectedPartitions = (0 until numPartitions).filter(_ % totalWorkers == myId)
+    val partitionsPerWorker = (numPartitions + totalWorkers - 1) / totalWorkers
+    val myStartPartition = myId * partitionsPerWorker
+    val myEndPartition = Math.min((myId + 1) * partitionsPerWorker, numPartitions)
+    val expectedPartitions = myStartPartition until myEndPartition
     
     println(s"[Worker] Checking ${expectedPartitions.size} partitions for missing senders...")
     
