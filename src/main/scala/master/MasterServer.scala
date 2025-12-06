@@ -323,9 +323,6 @@ class MasterServiceImpl(
       println(s"[Master]    Response: ${ack.msg}")
       
       channel.shutdown()
-
-      println(s"[Master] ℹ️  Marking Worker $workerId as merge complete after recovery")
-      ShuffleTracker.markMergeComplete(workerId)
     } catch {
       case e: Exception =>
         Console.err.println(s"[Master] ❌ Failed to send recovery: ${e.getMessage}")
