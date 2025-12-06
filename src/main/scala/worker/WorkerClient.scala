@@ -371,7 +371,7 @@ object WorkerClient {
           
           val batchFutures = batch.map { case (pid, recs) =>
             Future {
-              val targetWorker = pid % workerAddresses.size
+              val targetWorker = WorkerState.getPartitionTargetWorker(pid)
               checkpointSentPartition(pid, recs, conf.outputDir)
               sendPartitionWithRetry(targetWorker, pid, recs, workerAddresses)
               pid
