@@ -354,6 +354,7 @@ You should see:
 
   ```text
   🔄 Recovery mode: waiting for finalize...
+  ✅ Reported shuffle completion from checkpoint (${sendRecords.size} partitions)
   🔧 Starting finalize phase...
   ...
   ✅ Worker work completed
@@ -376,7 +377,6 @@ DATA_INPUT="/dataset/${DATASET}"
 DATA_OUTPUT="/home/orange/out"
 
 MASTER_IP="2.2.2.254"
-RECORDS_PER_WORKER=100000
 
 DEFAULT_NUM_WORKERS=3
 ```
@@ -404,19 +404,18 @@ DEFAULT_NUM_WORKERS=3
 ### Typical Workflow
 
 ```bash
-# One-time setup
-./deploy.sh init
-./deploy.sh gensort   # if using gensort-based data
-
-# Before each test
+# Before the first test
 sbt assembly
 ./deploy.sh jar
+
+# Before each test
 ./deploy.sh reset
 
 # Terminal 1: Master (manual)
 java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.jar master 3
 # Master prints something like:
-#   2.2.2.254:45729
+#    2.2.2.254:45729
+#    2.2.2.117, 2.2.2.118 2.2.2.119
 # Use this PORT for deploy.sh
 
 # Normal run (no fault injection)
@@ -425,8 +424,8 @@ java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.j
 # FT run: crash worker 2 at mid-shuffle
 FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 ./deploy.sh start 3 45729
 
-# FT run: Suppose Worker 2 was running on vm17
-./deploy.sh restart vm17 45729
+# FT run: Suppose Worker 2 was running on vm19 (refer to ordering of workers)
+./deploy.sh restart vm19 45729
 
 # Run valsort on all partitions and compare global input/output records
 ./deploy.sh check 3
