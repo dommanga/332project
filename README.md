@@ -287,7 +287,7 @@ Then restart the same command **without** fault injection to recover.
 
 On master node:
 * Master and Each worker should have dist-sort.jar already
-  * If not, use deploy.sh (Cluster Helper Script)
+  * If not, use deploy.sh (Cluster Helper Script - Refer to below section)
 
 ```bash
 cd ~/332project
@@ -315,7 +315,7 @@ Use the printed `2.2.2.254:38278` as `<master_ip:port>` for workers.
 
 ### 3. Start Workers
 
-On two worker VMs (e.g., `vm17`, `vm18`, `vm19`):
+On three worker VMs (e.g., `vm17`, `vm18`, `vm19`):
 
 ```bash
 # Worker 0
