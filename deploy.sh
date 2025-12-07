@@ -9,10 +9,10 @@ DATA_OUTPUT="/home/orange/out"
 MASTER_IP="2.2.2.254"
 RECORDS_PER_WORKER=100000
 
-DEFAULT_NUM_WORKERS=5
+DEFAULT_NUM_WORKERS=20
 
-# ALL_WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
-ALL_WORKERS=("vm14" "vm16" "vm17" "vm18" "vm19")
+ALL_WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
+# ALL_WORKERS=("vm14" "vm16" "vm17" "vm18" "vm19")
 
 RECORD_SIZE=100
 
@@ -57,8 +57,8 @@ init_workers() {
 update_code() {
   echo "=== Updating code on all workers ==="
   for host in "${WORKERS[@]}"; do
-    echo "→ $host: git pull && sbt compile"
-    ssh $host "cd $PROJECT_DIR && git pull origin main && sbt compile"
+    echo "→ $host: git pull"
+    ssh $host "cd $PROJECT_DIR && git pull origin main"
   done
   echo "✅ Code update complete"
 }
@@ -315,7 +315,7 @@ usage() {
   echo "Commands:"
   echo "  reclone     - Remove project dir and fresh git clone on workers"
   echo "  init        - Initial setup (git clone, mkdir input/output dirs)"
-  echo "  update      - git pull origin main && sbt compile on workers"
+  echo "  update      - git pull origin main on workers"
   echo "  jar        - Copy dist-sort.jar from master to workers"
   echo "  gensort     - Copy gensort and valsort binaries to workers"
   echo "  gendata     - Generate test input data on workers (uses gensort)"

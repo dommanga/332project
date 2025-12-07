@@ -410,7 +410,7 @@ DEFAULT_NUM_WORKERS=3
 | Command    | Description                                                                |
 |-----------|-----------------------------------------------------------------------------|
 | `init`    | Initial setup on workers (git clone `332project`, create input/output dirs) |
-| `update`  | `git pull origin main` + `sbt compile` on all selected workers              |
+| `update`  | `git pull origin main` on all selected workers                              |
 | `jar`     | Deploy `dist-sort.jar` to all selected workers                              |
 | `gensort` | Copy `gensort` and `valsort` binaries from `PROJECT_DIR` to each worker     |
 | `gendata` | Generate test input data on workers using `gensort`                         |
