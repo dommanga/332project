@@ -49,6 +49,21 @@ object ShuffleTracker {
   private val mergeCompletedWorkers = mutable.Set[Int]()
   private var totalWorkers = 0
 
+  private var timerStarted    = false
+  private var startTimeNanos: Long = 0L
+  private var endTimeNanos:   Long = 0L
+
+  def startGlobalTimer(): Boolean = synchronized {
+    if (!timerStarted) {
+      timerStarted = true
+      startTimeNanos = System.nanoTime()
+      endTimeNanos = 0L
+      true
+    } else {
+      false
+    }
+  }
+
   def init(n: Int): Unit = synchronized {
     totalWorkers = n
     completedWorkers.clear()
@@ -71,6 +86,8 @@ object ShuffleTracker {
     println(s"✅ Worker $workerId merge complete (${mergeCompletedWorkers.size}/$totalWorkers)")
 
     if (isAllMergeComplete) {
+      endTimeNanos = System.nanoTime()
+
       println("\n" + "=" * 60)
       println("🎉 Distributed sorting complete!")
       println("=" * 60)
@@ -87,9 +104,18 @@ object ShuffleTracker {
   }
 
   private def printFinalReport(): Unit = {
-    println(s"\nTotal workers: $totalWorkers")
+    println("\n===== FINAL EXECUTION REPORT =====")
+    println(s"Total workers: $totalWorkers")
     println(s"Shuffle completed: ${completedWorkers.size}")
     println(s"Merge completed: ${mergeCompletedWorkers.size}")
+
+    if (timerStarted && startTimeNanos != 0L && endTimeNanos != 0L) {
+      val seconds = (endTimeNanos - startTimeNanos) / 1e9
+      println(f"⏱️  Execution time: $seconds%.2f s")
+    } else {
+      println("⏱️  Timer not available")
+    }
+    println("=================================")
   }
 }
 
@@ -215,8 +241,11 @@ class MasterServiceImpl(
     }
 
     if (registry.size == expectedWorkers) {
-      val workerIPs = registry.getAllWorkers.sortBy(_.id).map(_.workerInfo.ip)
-      println(workerIPs.mkString(", "))
+      if (ShuffleTracker.startGlobalTimer()) {
+        val workerIPs = registry.getAllWorkers.sortBy(_.id).map(_.workerInfo.ip)
+        println(workerIPs.mkString(", "))
+        println("\n📌 All workers registered!\n")
+      }
     }
     assignment
   }

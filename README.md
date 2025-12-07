@@ -222,6 +222,9 @@ sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G \
   ```text
   <MASTER_IP>:<PORT>
   <ordering of IP addresses of workers>
+
+  📌 All workers registered!
+
   📋 Broadcasting PartitionPlan to workers...
   ```
 
@@ -334,6 +337,9 @@ Example output:
 ```text
 2.2.2.254:38278
 2.2.2.117, 2.2.2.118 2.2.2.119
+
+📌 All workers registered!
+
 📋 Broadcasting PartitionPlan to workers...
 ✅ Shuffle phase started
 ```
