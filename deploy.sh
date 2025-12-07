@@ -11,7 +11,7 @@ RECORDS_PER_WORKER=100000
 
 DEFAULT_NUM_WORKERS=20
 
-ALL_WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
+ALL_WORKERS=("vm17" "vm18" "vm19" "vm20" "vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16")
 # ALL_WORKERS=("vm14" "vm16" "vm17" "vm18" "vm19")
 
 RECORD_SIZE=100

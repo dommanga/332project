@@ -275,36 +275,6 @@ Then restart the same command **without** fault injection to recover.
 
 ---
 
-## Quick Start (Local)
-
-### Prerequisites
-
-* Java 8+
-* Scala 2.13
-* SBT 1.x
-* (Optional) `gensort` + `valsort` for synthetic data
-
-### Build
-
-```bash
-sbt compile
-```
-
-### Generate Local Test Data (Optional)
-
-```bash
-wget http://www.ordinal.com/try.cgi/gensort-linux-1.5.tar.gz
-tar -xzf gensort-linux-1.5.tar.gz
-
-mkdir -p data/input1 data/input2 data/input3
-
-./gensort -a -b0      100000 data/input1/data
-./gensort -a -b100000 100000 data/input2/data
-./gensort -a -b200000 100000 data/input3/data
-```
-
----
-
 ## Cluster Testing
 
 ### Environment
