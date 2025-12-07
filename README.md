@@ -412,7 +412,6 @@ DATA_INPUT="/dataset/${DATASET}"
 DATA_OUTPUT="/home/orange/out"
 
 MASTER_IP="2.2.2.254"
-# MASTER_PORT="5100"   # Use the port printed by the Master
 RECORDS_PER_WORKER=100000
 
 DEFAULT_NUM_WORKERS=3
@@ -420,16 +419,22 @@ DEFAULT_NUM_WORKERS=3
 
 ### Commands
 
-|   Command | Description                                      |
-| --------: | ------------------------------------------------ |
-|    `init` | Initial setup on workers (git clone, mkdirs)     |
-|  `update` | `git pull` + `sbt compile` on all workers        |
-| `gensort` | (If used) distribute gensort binary              |
-| `gendata` | Generate test data on workers (if using gensort) |
-|   `clean` | Clean output directories                         |
-|   `reset` | Clean output + (optionally) generate data        |
-|   `start` | Start all workers with configured MASTER_IP/PORT |
-|     `all` | `update` + `reset`                               |
+### Commands
+
+| Command    | Description                                                                 |
+|-----------|-----------------------------------------------------------------------------|
+| `init`    | Initial setup on workers (git clone `332project`, create input/output dirs) |
+| `update`  | `git pull origin main` + `sbt compile` on all selected workers              |
+| `gensort` | Copy `gensort` and `valsort` binaries from `PROJECT_DIR` to each worker     |
+| `gendata` | Generate test input data on workers using `gensort`                         |
+| `clean`   | Remove all files in `DATA_OUTPUT` on workers                                |
+| `reset`   | Currently equivalent to `clean` (can be extended to `clean+gendata`)       |
+| `start`   | Start worker processes (requires `num_workers` and current `MASTER_PORT`)   |
+| `restart` | Restart a **single** worker: `restart <host> <master_port>`                 |
+| `stop`    | Kill all `worker.WorkerClient` processes on the selected workers            |
+| `logs`    | Show last 50 lines of `/tmp/worker.log` from each worker                    |
+| `check`   | Run `valsort` on each partition and compare global input/output record counts |
+| `all`     | `update` + `reset`: prepare workers before starting a new experiment        |
 
 ### Typical Workflow
 
@@ -443,12 +448,28 @@ DEFAULT_NUM_WORKERS=3
 ./deploy.sh reset
 
 # Terminal 1: Master (manual)
-sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G \
-  "runMain master.MasterServer 3"
-# → note printed IP:PORT and update MASTER_PORT in deploy.sh if needed
+sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G "runMain master.MasterServer 3"
+# Master prints something like:
+#   2.2.2.254:45729
+# Use this PORT for deploy.sh
 
-# Terminal 2: Workers
-./deploy.sh start 3
+# Normal run (no fault injection)
+./deploy.sh start 3 45729
+
+# FT run: crash worker 2 at mid-shuffle
+FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 ./deploy.sh start 3 45729
+
+# FT run: Suppose Worker 2 was running on vm17
+./deploy.sh restart vm17 45729
+
+# Run valsort on all partitions and compare global input/output records
+./deploy.sh check 3
+
+# Tail worker logs
+./deploy.sh logs 3
+
+# Kill all worker clients if needed
+./deploy.sh stop 3
 ```
 
 ---
