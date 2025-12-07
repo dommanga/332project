@@ -10,6 +10,7 @@ object WorkerState {
   @volatile private var _workerInfo: Option[WorkerInfo] = None
   @volatile private var _workerAddresses: Option[Map[Int, (String, Int)]] = None
   @volatile private var _partitionPlan: Option[PartitionPlan] = None
+  @volatile private var shutdownSignaled = false
   
   private var _shuffleReport: Option[ShuffleCompletionReport] = None
   private val finalizeLatch = new CountDownLatch(1)
@@ -148,8 +149,11 @@ object WorkerState {
     finalizeLatch.await()
   }
 
-  def signalShutdown(): Unit = {
-    shutdownLatch.countDown()
+  def signalShutdown(): Unit = synchronized {
+    if (!shutdownSignaled) {
+      shutdownSignaled = true
+      shutdownLatch.countDown()
+    }
   }
 
   def awaitShutdownCommand(): Unit = {

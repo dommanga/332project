@@ -1,7 +1,7 @@
 package worker
 
 import rpc.sort._
-import scala.concurrent.{Future, Await, ExecutionContext}
+import scala.concurrent.{Future, Await, ExecutionContext, TimeoutException}
 import scala.concurrent.duration._
 import io.grpc.ManagedChannelBuilder
 import io.grpc.stub.StreamObserver
@@ -72,7 +72,8 @@ object WorkerClient {
             } catch {
               case _: InterruptedException => return
               case e: Exception => 
-                println(s"⚠️ Heartbeat error: ${e.getMessage}")
+                Console.err.println(s"⚠️ Heartbeat error: ${e.getMessage}")
+                Thread.sleep(2000)
             }
           }
         }
@@ -80,6 +81,7 @@ object WorkerClient {
       thread.start()
       println("💓 Heartbeat started")
     }
+  
     
     def stop(): Unit = {
       if (thread != null && thread.isAlive) {
@@ -184,6 +186,35 @@ object WorkerClient {
       checkpointDir.listFiles().exists(_.getName.startsWith("sent_p"))
   }
 
+  private def getSentPartitionsFromCheckpoint(outputDir: String): Seq[PartitionSendRecord] = {
+    val checkpointDir = new java.io.File(s"$outputDir/sent-checkpoint")
+    
+    if (!checkpointDir.exists()) {
+      return Seq.empty
+    }
+    
+    checkpointDir.listFiles()
+      .filter(_.getName.startsWith("sent_p"))
+      .filter(_.getName.endsWith(".dat"))
+      .map { file =>
+        // sent_p5.dat -> 5
+        val partitionId = file.getName
+          .stripPrefix("sent_p")
+          .stripSuffix(".dat")
+          .toInt
+        
+        val targetWorker = WorkerState.getPartitionTargetWorker(partitionId)
+        
+        PartitionSendRecord(
+          partitionId = partitionId,
+          targetWorkerId = targetWorker,
+          senderId = WorkerState.getWorkerId,
+          success = true
+        )
+      }
+      .toSeq
+  }
+
   // ===== Main Entry Point =====
   def main(args: Array[String]): Unit = {
 
@@ -236,6 +267,19 @@ object WorkerClient {
       if (hasSentCheckpoints(conf.outputDir)) {
         Thread.sleep(2000)
         println("🔄 Recovery mode: waiting for finalize...")
+
+        try {
+          val sendRecords = getSentPartitionsFromCheckpoint(conf.outputDir)
+          val report = ShuffleCompletionReport(
+            workerId = WorkerState.getWorkerId,
+            sendRecords = sendRecords
+          )
+          masterClient.reportShuffleComplete(report)
+          println(s"✅ Reported shuffle completion from checkpoint (${sendRecords.size} partitions)")
+        } catch {
+          case e: Exception =>
+            Console.err.println(s"⚠️ Failed to report shuffle: ${e.getMessage}")
+        }
         
         WorkerState.awaitFinalizeComplete()
         
@@ -291,7 +335,7 @@ object WorkerClient {
         partitionId: Int,
         records: Seq[Array[Byte]],
         workerAddresses: Map[Int, (String, Int)],
-        maxRetries: Int = 5
+        maxRetries: Int = 3
       ): Boolean = {
         
         var attempt = 0
@@ -337,7 +381,7 @@ object WorkerClient {
               }
               
               requestObserver.onCompleted()
-              Await.result(ackPromise.future, 30.seconds)
+              Await.result(ackPromise.future, 10.seconds)
               channel.shutdown()
               
               return true
@@ -351,7 +395,7 @@ object WorkerClient {
               attempt += 1
               
               if (attempt < maxRetries) {
-                val backoff = 3000 * attempt
+                val backoff = 2000 * attempt
                 Thread.sleep(backoff)
               } else {
                 Console.err.println(s"⚠️ Failed to send p$partitionId after $maxRetries attempts")
@@ -385,7 +429,7 @@ object WorkerClient {
             }
           }
           
-          val results = Await.result(Future.sequence(batchFutures), 120.seconds)
+          val results = Await.result(Future.sequence(batchFutures), 45.seconds)
           val (successes, failures) = results.partition(_._2)
 
           if (failures.nonEmpty) {

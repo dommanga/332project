@@ -159,10 +159,10 @@ Our implementation supports:
   ```
 
   * If `true` → **recovery mode**:
-
     * Skip sampling / local sort / partition / shuffle.
-    * Wait for finalize command from Master.
-    * Reconstruct missing partitions using checkpoint & other workers.
+    * Report shuffle completion from checkpoint to Master.
+    * Wait for finalize, then serve checkpointed partitions to others.
+    * Request missing partitions and merge all runs to final output.
 
 #### 5. Recovery Mode (Worker)
 
@@ -173,36 +173,44 @@ On restart (same VM, same CLI args):
 2. Registers with Master → gets same worker ID.
 
 3. Detects existing `sent-checkpoint` → prints:
+```text
+🔄 Recovery mode: waiting for finalize...
+```
 
-   ```text
-   🔄 Recovery mode: waiting for finalize...
-   ```
+4. **Reports shuffle completion to Master based on checkpoint files.**
+```text
+  ✅ Reported shuffle completion from checkpoint (12 partitions)
+```
 
-4. After Master sees all shuffles complete (including rejoined worker), it calls `finalizePartitions` on all workers.
+5. After Master sees all shuffles complete (including rejoined worker), it calls `finalizePartitions` on all workers.
 
-5. Worker:
+6. During finalize, the recovered worker:
 
-   * Checks which partitions are missing.
-   * Requests those partitions from available workers.
-   * Prints logs like:
+   * **Serves its checkpointed partitions to other workers on request:**
+```text
+     📤 Sending p5 to w1
+     🔄 Regenerating p5...
+     ✅ Sent regenerated p5: 50962 records
+```
 
-     ```text
+   * **Requests partitions it is responsible for from other workers:**
+```text
+     🔍 Checking 4 partitions for missing data...
      ⚠️  p4 missing from workers: Set(0, 1)
      🔄 Requesting p4 from w0...
      ✅ Received p4 from w0: 77178 records
-     ```
+```
 
-6. Writes final partitions:
-
-   ```text
+7. Merges all received runs and writes final partitions:
+```text
    🔧 Finalizing 4 partitions...
    ✅ Wrote partition.4
    ✅ Wrote partition.5
    ✅ Wrote partition.6
    ✅ Wrote partition.7
-   ```
+```
 
-7. Reports merge completion to Master → normal shutdown.
+8. Reports merge completion to Master → normal shutdown.
 
 ---
 

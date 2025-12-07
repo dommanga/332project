@@ -42,6 +42,8 @@ class WorkerServer(port: Int, outputDir: String) {
 
 class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   extends WorkerServiceGrpc.WorkerService {
+  
+  @volatile private var shutdownReceived = false
 
   private val checkpointDir = {
     val dir = new java.io.File(s"$outputDir/shuffle-checkpoint")
@@ -425,7 +427,12 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
   override def shutdown(taskId: TaskId): Future[Ack] = {
     Future {
-      println(s"🛑 Shutdown command received")
+      this.synchronized {
+        if (!shutdownReceived) {
+          shutdownReceived = true
+          println(s"🛑 Shutdown command received")
+        }
+      }
       WorkerState.signalShutdown()
       Ack(ok = true, msg = "Shutdown acknowledged")
     }

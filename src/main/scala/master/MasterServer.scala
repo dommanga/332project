@@ -224,13 +224,6 @@ class MasterServiceImpl(
             
             stub.setPartitionPlan(plan)
             println(s"✅ Resent PartitionPlan to Worker ${assignment.workerId}")
-
-            ShuffleTracker.markShuffleComplete(assignment.workerId)
-
-            if (ShuffleTracker.isAllShuffleComplete) {
-              println("🔧 All workers completed shuffle, triggering finalize")
-              triggerFinalizePhase()
-            }
             
             channel.shutdown()
             
