@@ -18,7 +18,10 @@ final case class WorkerConfig(
 /** Worker 실행 메인 */
 object WorkerClient {
 
-  private val StateDir: String = ".worker_state"
+  private def stateDirFor(outputDir: String): java.io.File = {
+    val safe = outputDir.replace('/', '_').replace('\\', '_')
+    new java.io.File(s".worker_state_$safe")
+  }
 
   // ===== Fault Injector =====
   object FaultInjector {
@@ -233,12 +236,12 @@ object WorkerClient {
           return
       }
 
-      val previousPort = loadSavedPort().getOrElse(0)
+      val previousPort = loadSavedPort(conf.outputDir).getOrElse(0)
 
       val workerServer = new WorkerServer(previousPort, conf.outputDir)
       val actualPort   = workerServer.start()
 
-      savePort(actualPort)
+      savePort(actualPort, conf.outputDir)
 
       val masterAddr = conf.masterAddr.split(":")
       val workerInfo = WorkerInfo(
@@ -292,6 +295,7 @@ object WorkerClient {
         
         // Cleanup temporary directories
         cleanupTempDirectories(conf.outputDir)
+        deleteAllWorkerStateDirs()
         
         println("💀 Worker shutting down...")
         return
@@ -488,6 +492,7 @@ object WorkerClient {
 
       // Cleanup temporary directories
       cleanupTempDirectories(conf.outputDir)
+      deleteAllWorkerStateDirs()
 
       println("💀 Worker shutting down...")
         
@@ -641,8 +646,8 @@ object WorkerClient {
   // ---------------------------------------------------------
   // Port persistence helpers (stateful restart)
   // ---------------------------------------------------------
-  private def loadSavedPort(): Option[Int] = {
-    val dir = new java.io.File(StateDir)
+  private def loadSavedPort(outputDir: String): Option[Int] = {
+    val dir = stateDirFor(outputDir)
     val f   = new java.io.File(dir, "worker-port.state")
 
     if (!f.exists()) return None
@@ -660,8 +665,8 @@ object WorkerClient {
     }
   }
 
-  private def savePort(port: Int): Unit = {
-    val dir = new java.io.File(StateDir)
+  private def savePort(port: Int, outputDir: String): Unit = {
+    val dir = stateDirFor(outputDir)
     dir.mkdirs()
 
     val f  = new java.io.File(dir, "worker-port.state")
@@ -672,5 +677,36 @@ object WorkerClient {
       pw.close()
     }
   }
+  
+  private def deleteRecursively(file: java.io.File): Unit = {
+    if (file.isDirectory) {
+      val children = file.listFiles()
+      if (children != null) {
+        children.foreach(deleteRecursively)
+      }
+    }
+    if (!file.delete()) {
+      Console.err.println(s"⚠️ Failed to delete: ${file.getAbsolutePath}")
+    }
+  }
 
+  private def deleteAllWorkerStateDirs(): Unit = {
+    try {
+      val cwd  = new java.io.File(".").getCanonicalFile
+      val all  = Option(cwd.listFiles()).getOrElse(Array.empty[java.io.File])
+      val dirs = all.filter(f => f.isDirectory && f.getName.contains("worker_state"))
+
+      if (dirs.isEmpty) {
+        println(s"🧹 No worker_state dirs found under ${cwd.getAbsolutePath}")
+      } else {
+        dirs.foreach { d =>
+          println(s"🧹 Cleaning worker state dir: ${d.getName}")
+          deleteRecursively(d)
+        }
+      }
+    } catch {
+      case e: Exception =>
+        Console.err.println(s"⚠️ Failed to clean worker state dirs: ${e.getMessage}")
+    }
+  }
 }

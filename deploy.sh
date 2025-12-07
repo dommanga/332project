@@ -12,11 +12,11 @@ RECORDS_PER_WORKER=100000
 DEFAULT_NUM_WORKERS=20
 
 ALL_WORKERS=("vm01" "vm02" "vm03" "vm04" "vm05" "vm06" "vm07" "vm08" "vm09" "vm10" "vm11" "vm12" "vm13" "vm14" "vm15" "vm16" "vm17" "vm18" "vm19" "vm20")
-# ALL_WORKERS=("vm14" "vm16" "vm17" "vm18" "vm19")
 
 RECORD_SIZE=100
 
 JAR_PATH="$PROJECT_DIR/target/scala-2.13/dist-sort.jar"
+
 JAVA_OPTS="-Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
 
 # ============================================
@@ -145,8 +145,7 @@ start_workers() {
     ssh $SSH_OPTS "$host" "
       cd '$PROJECT_DIR' && \
       $remote_env_cmd \
-      nohup java $JAVA_OPTS \
-        -jar '$JAR_PATH' \
+      nohup java -jar '$JAR_PATH' \
         worker $MASTER_IP:$MASTER_PORT \
         -I '$DATA_INPUT' \
         -O '$DATA_OUTPUT' \
@@ -170,8 +169,7 @@ restart_worker() {
 
   ssh $SSH_OPTS "$host" "
     cd '$PROJECT_DIR' && \
-    nohup java $JAVA_OPTS \
-      -jar '$JAR_PATH' \
+    nohup java -jar '$JAR_PATH' \
       worker $MASTER_IP:$MASTER_PORT \
       -I '$DATA_INPUT' \
       -O '$DATA_OUTPUT' \

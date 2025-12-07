@@ -23,11 +23,14 @@ class WorkerRegistry(expectedWorkers: Int) {
   private val workers = mutable.Map.empty[String, RegisteredWorker]  // IP -> Worker
   private var nextId = 0
 
+  private def keyOf(info: WorkerInfo): String =
+    s"${info.ip}:${info.port}"
+
   /** Register worker - initially assigns temporary ID based on IP */
   def register(info: WorkerInfo): WorkerAssignment = synchronized {
-    val ip = info.ip
+    val key = keyOf(info)
     
-    workers.get(ip) match {
+    workers.get(key) match {
       case Some(w) if w.phase == DEAD =>
         println(s"🔄 Worker ${info.ip} rejoining with ID ${w.id}")
         val revived = w.copy(
@@ -35,7 +38,7 @@ class WorkerRegistry(expectedWorkers: Int) {
           lastHeartbeat = Instant.now(),
           phase = ALIVE
         )
-        workers(ip) = revived
+        workers(key) = revived
 
         WorkerAssignment(
           success = true,
@@ -56,7 +59,7 @@ class WorkerRegistry(expectedWorkers: Int) {
       
       case Some(w) =>
         // fallback – theoretically unreachable
-        println(s"⚠ Unexpected phase for worker at $ip: ${w.phase}")
+        println(s"⚠ Unexpected phase for worker at ${info.ip}: ${w.phase}")
         WorkerAssignment(
           success = true,
           message = s"Registered as worker ${w.id} (unexpected phase)",
@@ -75,7 +78,7 @@ class WorkerRegistry(expectedWorkers: Int) {
           lastHeartbeat = Instant.now(),
           phase = ALIVE
         )
-        workers(ip) = newWorker
+        workers(key) = newWorker
 
         WorkerAssignment(
           success = true,
@@ -89,13 +92,14 @@ class WorkerRegistry(expectedWorkers: Int) {
 
   /** Update heartbeat */
   def updateHeartbeat(info: WorkerInfo): Ack = synchronized {
-    workers.get(info.ip) match {
+    val key = keyOf(info)
+    workers.get(key) match {
       case Some(w) if w.id == info.id =>
-        workers(info.ip) = w.copy(lastHeartbeat = Instant.now(), phase = ALIVE)
+        workers(key) = w.copy(lastHeartbeat = Instant.now(), phase = ALIVE)
         Ack(ok = true, msg = "OK")
       
       case _ =>
-        Ack(ok = false, msg = s"Unknown worker: ${info.ip}")
+        Ack(ok = false, msg = s"Unknown worker: ${info.ip}:${info.port}")
     }
   }
 
@@ -111,9 +115,10 @@ class WorkerRegistry(expectedWorkers: Int) {
 
   /** Mark dead by worker ID */
   def markDead(workerId: Int): Unit = synchronized {
-    workers.values.find(_.id == workerId).foreach { w =>
-      workers(w.workerInfo.ip) = w.copy(phase = DEAD)
-    }
+    workers.collectFirst { case (k, w) if w.id == workerId => (k, w) }
+      .foreach { case (key, w) =>
+        workers(key) = w.copy(phase = DEAD)
+      }
   }
 
   /**

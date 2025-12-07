@@ -53,6 +53,9 @@ object ShuffleTracker {
   private var startTimeNanos: Long = 0L
   private var endTimeNanos:   Long = 0L
 
+  private var shuffleAllReported = false
+  private var mergeAllReported   = false
+
   def startGlobalTimer(): Boolean = synchronized {
     if (!timerStarted) {
       timerStarted = true
@@ -68,31 +71,34 @@ object ShuffleTracker {
     totalWorkers = n
     completedWorkers.clear()
     mergeCompletedWorkers.clear()
+
+    shuffleAllReported = false
+    mergeAllReported   = false
   }
 
-  def markShuffleComplete(workerId: Int): Unit = synchronized {
+  def markShuffleComplete(workerId: Int): Boolean = synchronized {
     completedWorkers += workerId
     println(s"✅ Worker $workerId shuffle complete (${completedWorkers.size}/$totalWorkers)")
 
-    if (isAllShuffleComplete) {
-      println("\n" + "=" * 60)
-      println("All workers completed shuffle phase!")
-      println("=" * 60 + "\n")
+    val nowAll = completedWorkers.size >= totalWorkers
+    val firstTimeAll = nowAll && !shuffleAllReported
+    if (firstTimeAll) {
+      shuffleAllReported = true
     }
+    firstTimeAll
   }
 
-  def markMergeComplete(workerId: Int): Unit = synchronized {
+  def markMergeComplete(workerId: Int): Boolean = synchronized {
     mergeCompletedWorkers += workerId
     println(s"✅ Worker $workerId merge complete (${mergeCompletedWorkers.size}/$totalWorkers)")
 
-    if (isAllMergeComplete) {
+    val nowAll = mergeCompletedWorkers.size >= totalWorkers
+    val firstTimeAll = nowAll && !mergeAllReported
+    if (firstTimeAll) {
+      mergeAllReported = true
       endTimeNanos = System.nanoTime()
-
-      println("\n" + "=" * 60)
-      println("🎉 Distributed sorting complete!")
-      println("=" * 60)
-      printFinalReport()
     }
+    firstTimeAll
   }
 
   def isAllShuffleComplete: Boolean = {
@@ -103,7 +109,7 @@ object ShuffleTracker {
     mergeCompletedWorkers.size >= totalWorkers
   }
 
-  private def printFinalReport(): Unit = {
+  def printFinalReport(): Unit = {
     println("\n===== FINAL EXECUTION REPORT =====")
     println(s"Total workers: $totalWorkers")
     println(s"Shuffle completed: ${completedWorkers.size}")
@@ -334,9 +340,13 @@ class MasterServiceImpl(
       shuffleCompletions(key) = record.success
     }
     
-    ShuffleTracker.markShuffleComplete(workerId)
+    val allJustCompleted = ShuffleTracker.markShuffleComplete(workerId)
     
-    if (ShuffleTracker.isAllShuffleComplete) {
+    if (allJustCompleted) {
+      println("\n" + "=" * 60)
+      println("All workers completed shuffle phase!")
+      println("=" * 60 + "\n")
+
       println("🔧 All workers completed shuffle, triggering finalize")
       triggerFinalizePhase()
     }
@@ -356,9 +366,14 @@ class MasterServiceImpl(
 
   /* ---------------- Report Merge ---------------- */
   override def reportMergeComplete(status: WorkerStatus): Future[Ack] = Future {
-    ShuffleTracker.markMergeComplete(status.workerId)
+    val allJustCompleted = ShuffleTracker.markMergeComplete(status.workerId)
 
-    if (ShuffleTracker.isAllMergeComplete) {
+    if (allJustCompleted) {
+      println("\n" + "=" * 60)
+      println("🎉 Distributed sorting complete!")
+      println("=" * 60)
+      ShuffleTracker.printFinalReport()
+
       broadcastShutdown()
 
       println("\n🎉 All work complete! Shutting down in 3 seconds...")

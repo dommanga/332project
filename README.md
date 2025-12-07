@@ -136,81 +136,108 @@ Our implementation supports:
     ✅ Resent PartitionPlan to Worker 1
     ```
 
-#### 4. Sender-Side Checkpoint (Worker)
+### **4. Shuffle Checkpointing (Sender-Side)**
 
-* Each worker, during shuffle, **checkpoints the data it sends**:
+During shuffle, each worker checkpoints every partition *before* sending it out.
 
-  * For each partition `pid`, before sending:
+For each partition `pid`:
 
-    ```scala
-    checkpointSentPartition(pid, recs, outputDir)
-    ```
+```
+<output_dir>/sent-checkpoint/sent_p<pid>.dat
+```
 
-  * Stored under:
+These files contain the exact bytes that were streamed to other workers.
+If a worker crashes mid-shuffle, these files remain intact.
 
-    ```text
-    <outputDir>/sent-checkpoint/sent_p<PID>.dat
-    ```
+On restart, the worker checks:
 
-* On restart, worker checks:
+```scala
+hasSentCheckpoints(outputDir)
+```
 
-  ```scala
-  hasSentCheckpoints(outputDir)
-  ```
+If `true`, the worker enters **Recovery Mode**, meaning:
 
-  * If `true` → **recovery mode**:
-    * Skip sampling / local sort / partition / shuffle.
-    * Report shuffle completion from checkpoint to Master.
-    * Wait for finalize, then serve checkpointed partitions to others.
-    * Request missing partitions and merge all runs to final output.
+* Skip sampling / local sort / partitioning / shuffle
+* Immediately report shuffle completion to Master
+* Later serve these same checkpointed partitions to other workers during finalize
 
-#### 5. Recovery Mode (Worker)
+This guarantees the worker never recomputes shuffle output after a crash.
 
-On restart (same VM, same CLI args):
+### **5. Receiver-Side Checkpointing**
 
-1. Worker starts `WorkerServer` (with port persistence).
+Whenever a worker *receives* a partition from another worker, it writes it as a run file:
 
-2. Registers with Master → gets same worker ID.
+```
+<output_dir>/recv/p<pid>_from_w<source>.dat
+```
 
-3. Detects existing `sent-checkpoint` → prints:
-```text
+These runs capture *all data the worker collected* during shuffle.
+If a worker is restarted, these run files still exist and are used during finalize.
+
+During finalize, each worker:
+
+1. Checks which partitions it already has runs for
+2. Requests missing runs from the responsible workers
+3. Performs a **disk-based k-way merge** to write final outputs like:
+
+```
+<output_dir>/partition.<pid>
+```
+
+This ensures a worker can finish finalize deterministically, even if shuffle was interrupted.
+
+### **6. Recovery Mode (Worker Restart)**
+
+A worker restarted on the same node with the same CLI args behaves as a continuation of the previous execution.
+
+At startup:
+
+```
 🔄 Recovery mode: waiting for finalize...
 ```
 
-4. **Reports shuffle completion to Master based on checkpoint files.**
-```text
-  ✅ Reported shuffle completion from checkpoint (12 partitions)
+The worker:
+
+1. Restores its previous server port from `.worker_state*`
+2. Re-registers with Master using the same worker ID
+3. Reports shuffle completion using sender-side checkpoints
+4. Waits for Master to re-send the PartitionPlan (needed after crash)
+5. Runs finalize:
+
+   * Serves its checkpointed partitions to others
+   * Requests missing partitions from peers
+   * Performs disk-based merge to regenerate its final outputs
+
+Example log (actual):
+
+```
+🔍 Checking 4 partitions for missing data...
+🔄 Requesting p8 from w0...
+🔄 Requesting p8 from w1...
+🔄 Requesting p8 from w2...
+📤 Sending p8 to w2
+🔄 Regenerating p8...
 ```
 
-5. After Master sees all shuffles complete (including rejoined worker), it calls `finalizePartitions` on all workers.
+When finalize completes:
 
-6. During finalize, the recovered worker:
-
-   * **Serves its checkpointed partitions to other workers on request:**
-```text
-     📤 Sending p5 to w1
-     🔄 Regenerating p5...
-     ✅ Sent regenerated p5: 50962 records
+```
+✅ Merge completion reported to Master
 ```
 
-   * **Requests partitions it is responsible for from other workers:**
-```text
-     🔍 Checking 4 partitions for missing data...
-     ⚠️  p4 missing from workers: Set(0, 1)
-     🔄 Requesting p4 from w0...
-     ✅ Received p4 from w0: 77178 records
+After Master broadcasts shutdown:
+
+```
+🧹 Cleaning worker state dir: .worker_state__home_orange_out
+💀 Worker shutting down...
 ```
 
-7. Merges all received runs and writes final partitions:
-```text
-   🔧 Finalizing 4 partitions...
-   ✅ Wrote partition.4
-   ✅ Wrote partition.5
-   ✅ Wrote partition.6
-   ✅ Wrote partition.7
-```
+This model ensures:
 
-8. Reports merge completion to Master → normal shutdown.
+* A crashed worker can **always** recover
+* Data sent before the crash is **never recomputed**
+* Data received before the crash is **never lost**
+* The worker's ID, port, and partition responsibilities remain consistent
 
 ---
 
@@ -219,7 +246,7 @@ On restart (same VM, same CLI args):
 ### Master CLI
 
 ```bash
-java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.jar master <num_workers>
+java -jar target/scala-2.13/dist-sort.jar master <num_workers>
 ```
 
 * Master binds to port `0` (OS chooses a free port).
@@ -240,7 +267,7 @@ java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.j
 ### Worker CLI
 
 ```bash
-java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker <master_ip:port> -I <input_dir> -O <output_dir>
+java -jar target/scala-2.13/dist-sort.jar worker <master_ip:port> -I <input_dir> -O <output_dir>
 ```
 
 * Worker:
@@ -268,7 +295,7 @@ We use env vars for deterministic failure testing:
 Example (crash worker 1 mid-shuffle):
 
 ```bash
-FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=1 java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
+FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=1 java -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 ```
 
 Then restart the same command **without** fault injection to recover.
@@ -319,19 +346,19 @@ On three worker VMs (e.g., `vm17`, `vm18`, `vm19`):
 
 ```bash
 # Worker 0
-java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
+java -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 
 # Worker 1
-java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
+java -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 
 # Worker 2 (with fault injection example)
-FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
+FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 java -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 ```
 
 After the crash, restart Worker 2 without fault injection:
 
 ```bash
-java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
+java -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 ```
 
 You should see:
@@ -354,7 +381,6 @@ You should see:
 
   ```text
   🔄 Recovery mode: waiting for finalize...
-  ✅ Reported shuffle completion from checkpoint (${sendRecords.size} partitions)
   🔧 Starting finalize phase...
   ...
   ✅ Worker work completed
@@ -422,7 +448,7 @@ java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.j
 ./deploy.sh start 3 45729
 
 # FT run: crash worker 2 at mid-shuffle
-FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 ./deploy.sh start 3 45729
+FAULT_INJECT_PHASE=after-partition FAULT_INJECT_WORKER=2 ./deploy.sh start 3 45729
 
 # FT run: Suppose Worker 2 was running on vm19 (refer to ordering of workers)
 ./deploy.sh restart vm19 45729

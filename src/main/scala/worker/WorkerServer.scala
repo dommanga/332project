@@ -202,8 +202,8 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     val files = getRunFilesForPartition(partitionId)
 
     if (files.isEmpty) {
-      println(s"⚠️ No runs found for $partitionId, skipping")
-      return
+      System.err.println(s"❌ FATAL: No runs found for $partitionId even after recovery")
+      throw new RuntimeException(s"Missing partition data for $partitionId")
     }
 
     val mergedIter: Iterator[Array[Byte]] = mergeRunsFromFiles(files)
