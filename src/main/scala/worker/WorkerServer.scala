@@ -45,56 +45,10 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   
   @volatile private var shutdownReceived = false
 
-  private val checkpointDir = {
-    val dir = new java.io.File(s"$outputDir/shuffle-checkpoint")
+  private val recvDir = {
+    val dir = new java.io.File(s"$outputDir/recv")
     dir.mkdirs()
     dir
-  }
-
-  object PartitionStore {
-    private val runData = mutable.Map.empty[String, mutable.ArrayBuffer[Array[Array[Byte]]]]
-    
-    def addRun(partitionId: String, run: Array[Array[Byte]], checkpointDir: java.io.File): Unit = this.synchronized {
-      if (runData.contains(partitionId) && runData(partitionId).nonEmpty) {
-        return
-      }
-
-      val runs = runData.getOrElseUpdate(partitionId, mutable.ArrayBuffer.empty)
-      runs += run
-    }
-    
-    def loadRuns(partitionId: String): List[Array[Array[Byte]]] = this.synchronized {
-      runData.get(partitionId).map(_.toList).getOrElse(Nil)
-    }
-    
-    def drainRuns(partitionId: String): List[Array[Array[Byte]]] = this.synchronized {
-      val runs = loadRuns(partitionId)
-      runData.remove(partitionId)
-      runs
-    }
-    
-    def allPartitionIds: List[String] = this.synchronized {
-      runData.keys.toList
-    }
-
-    def getSendersForPartition(partitionId: String): Set[Int] = this.synchronized {
-      runData.keys
-        .filter(_.startsWith(s"${partitionId}_from_w"))
-        .map { key =>
-          key.split("_from_w")(1).toInt
-        }
-        .toSet
-    }
-
-    def loadAllRunsForPartition(partitionId: String): List[Array[Array[Byte]]] = synchronized {
-      runData.keys
-        .filter(key => {
-          val extracted = key.split("_from_").headOption.getOrElse("")
-          extracted == partitionId
-        })
-        .flatMap(runId => runData(runId))
-        .toList
-    }
   }
 
   override def setPartitionPlan(plan: PartitionPlan): Future[Ack] = {
@@ -114,46 +68,60 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
   override def pushPartition(responseObserver: StreamObserver[Ack]): StreamObserver[PartitionChunk] = {
     new StreamObserver[PartitionChunk] {
-      private var countChunks: Long = 0L
+      private var countChunks: Long       = 0L
       private var currentPid: Option[String] = None
-      private var senderId: Int = -1
-      private val recordBuffer = mutable.ArrayBuffer.empty[Array[Byte]]
+      private var senderId: Int           = -1
+      private var fos: FileOutputStream   = _
+
+      private def ensureOutputStream(partitionId: String, senderId: Int): Unit = {
+        if (fos == null) {
+          val runId   = s"${partitionId}_from_w$senderId"      // 예: p3_from_w2
+          val tmpFile = new java.io.File(recvDir, s"$runId.dat.tmp")
+          fos = new FileOutputStream(tmpFile)
+        }
+      }
 
       override def onNext(ch: PartitionChunk): Unit = {
         countChunks += 1
-        
+
         if (currentPid.isEmpty) {
           currentPid = Some(ch.partitionId)
           senderId = ch.senderId
+          ensureOutputStream(ch.partitionId, senderId)
         }
-        
+
         val bytes = ch.payload.toByteArray
-        val recLen = RecordIO.RecordSize
-        
-        var offset = 0
-        while (offset + recLen <= bytes.length) {
-          val rec = java.util.Arrays.copyOfRange(bytes, offset, offset + recLen)
-          recordBuffer += rec
-          offset += recLen
-        }
+        fos.write(bytes)
       }
 
       override def onError(t: Throwable): Unit = {
         Console.err.println(s"❌ pushPartition error: ${t.getMessage}")
+        try {
+          if (fos != null) fos.close()
+        } catch {
+          case _: Exception =>
+        }
         responseObserver.onError(t)
       }
 
       override def onCompleted(): Unit = {
         val pid = currentPid.getOrElse("")
-        val run = recordBuffer.toArray
-        
-        if (pid.nonEmpty && run.nonEmpty) {
-          val runId = s"${pid}_from_w${senderId}"
-          PartitionStore.addRun(runId, run, checkpointDir)
-          println(s"📦 Received $pid from w$senderId: ${run.length} records")
+        try {
+          if (fos != null) fos.close()
+        } catch {
+          case _: Exception =>
         }
-        
-        responseObserver.onNext(Ack(ok = true, msg = s"Received ${run.length} records"))
+
+        if (pid.nonEmpty && fos != null) {
+          val runId   = s"${pid}_from_w$senderId"
+          val tmpFile = new java.io.File(recvDir, s"$runId.dat.tmp")
+          val finalFile = new java.io.File(recvDir, s"$runId.dat")
+          if (finalFile.exists()) finalFile.delete()
+          tmpFile.renameTo(finalFile)
+          println(s"📦 Received $pid from w$senderId -> ${finalFile.getName} (${finalFile.length()} bytes)")
+        }
+
+        responseObserver.onNext(Ack(ok = true, msg = s"Received $countChunks chunks"))
         responseObserver.onCompleted()
       }
     }
@@ -165,7 +133,41 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   private def compareRecords(a: Array[Byte], b: Array[Byte]): Int =
     RecordIO.compareKeys(keyOf(a), keyOf(b))
 
-  private def mergeRuns(runs: List[Array[Array[Byte]]]): Iterator[Array[Byte]] = {
+  private def recordIteratorFromFile(file: java.io.File): Iterator[Array[Byte]] = {
+    new Iterator[Array[Byte]] {
+      private val is  = new java.io.FileInputStream(file)
+      private val ch  = is.getChannel
+      private val recSize = RecordIO.RecordSize
+      private val buf = java.nio.ByteBuffer.allocate(recSize)
+      private var nextRec: Array[Byte] = readNextRecord()
+
+      private def readNextRecord(): Array[Byte] = {
+        buf.clear()
+        val n = ch.read(buf)
+        if (n == recSize) {
+          buf.flip()
+          val arr = new Array[Byte](recSize)
+          buf.get(arr)
+          arr
+        } else {
+          ch.close()
+          is.close()
+          null
+        }
+      }
+
+      override def hasNext: Boolean = nextRec != null
+
+      override def next(): Array[Byte] = {
+        if (nextRec == null) throw new NoSuchElementException("No more records")
+        val result = nextRec
+        nextRec = readNextRecord()
+        result
+      }
+    }
+  }
+
+  private def mergeRunsFromFiles(files: List[java.io.File]): Iterator[Array[Byte]] = {
     case class RunIter(var current: Array[Byte], it: Iterator[Array[Byte]])
 
     implicit val runOrdering: Ordering[RunIter] =
@@ -175,8 +177,8 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
 
     val pq = mutable.PriorityQueue.empty[RunIter]
 
-    runs.foreach { runArr =>
-      val it = runArr.iterator
+    files.foreach { file =>
+      val it = recordIteratorFromFile(file)
       if (it.hasNext) {
         pq.enqueue(RunIter(it.next(), it))
       }
@@ -197,29 +199,24 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
   }
 
   def finalizePartition(partitionId: String): Unit = {
-    val runs: List[Array[Array[Byte]]] = PartitionStore.loadAllRunsForPartition(partitionId)
-    
-    if (runs.isEmpty) {
+    val files = getRunFilesForPartition(partitionId)
+
+    if (files.isEmpty) {
+      println(s"⚠️ No runs found for $partitionId, skipping")
       return
     }
-    
-    val mergedIter: Iterator[Array[Byte]] = mergeRuns(runs)
+
+    val mergedIter: Iterator[Array[Byte]] = mergeRunsFromFiles(files)
     writePartitionToFile(partitionId, mergedIter)
   }
 
   def finalizeAll(): Unit = {
-    val allRunIds = PartitionStore.allPartitionIds
+    val myPartitions = WorkerState.getMyPartitions.map(pid => s"p$pid")
     
-    val uniquePartitionIds = allRunIds
-      .map { runId =>
-        runId.split("_from_").headOption.getOrElse(runId)
-      }
-      .toSet
+    println(s"🔧 Finalizing ${myPartitions.size} partitions...")
     
-    println(s"🔧 Finalizing ${uniquePartitionIds.size} partitions...")
-    
-    uniquePartitionIds.foreach { pid =>
-      finalizePartition(pid)
+    myPartitions.foreach { pidStr =>
+      finalizePartition(pidStr)
     }
   }
 
@@ -280,8 +277,8 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
     
     expectedPartitions.foreach { pid =>
       val expectedSenders = WorkerState.getMasterClient.queryPartitionSenders(pid).toSet
-      val receivedSenders = PartitionStore.getSendersForPartition(s"p$pid")
-      
+      val receivedSenders = getReceivedSendersForPartition(pid)  // ✅ 디스크 기반
+
       val missingSenders = expectedSenders -- receivedSenders
       
       if (missingSenders.nonEmpty) {
@@ -292,6 +289,31 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
         }
       }
     }
+  }
+
+  // ✅ 특정 partition 에 대해, 어떤 sender 들의 파일이 있는지 확인
+  private def getReceivedSendersForPartition(partitionId: Int): Set[Int] = {
+    val prefix = s"p${partitionId}_from_w"
+    val files = Option(recvDir.listFiles()).getOrElse(Array.empty[java.io.File])
+
+    files
+      .filter(f => f.getName.startsWith(prefix) && f.getName.endsWith(".dat"))
+      .map { f =>
+        // p3_from_w2.dat → "2"
+        f.getName
+          .stripPrefix(prefix)
+          .stripSuffix(".dat")
+          .toInt
+      }
+      .toSet
+  }
+
+  // ✅ 특정 partition 에 해당하는 모든 run 파일 목록
+  private def getRunFilesForPartition(partitionIdStr: String): List[java.io.File] = {
+    val prefix = s"${partitionIdStr}_from_w"  // 예: "p3_from_w"
+    Option(recvDir.listFiles()).getOrElse(Array.empty[java.io.File])
+      .filter(f => f.getName.startsWith(prefix) && f.getName.endsWith(".dat"))
+      .toList
   }
 
   private def requestPartitionFromWorker(senderId: Int, partitionId: Int): Unit = {
@@ -315,30 +337,44 @@ class WorkerServiceImpl(outputDir: String)(implicit ec: ExecutionContext)
               )
               
               val latch = new java.util.concurrent.CountDownLatch(1)
-              val recordBuffer = scala.collection.mutable.ArrayBuffer.empty[Array[Byte]]
+
+              @volatile var fos: FileOutputStream = null
+              val pidStr = s"p$partitionId"
+              val runId  = s"${pidStr}_from_w$senderId"
+
+              def ensureOutputStream(): Unit = {
+                if (fos == null) {
+                  val tmpFile = new java.io.File(recvDir, s"$runId.dat.tmp")
+                  fos = new FileOutputStream(tmpFile)
+                }
+              }
               
               val responseObserver = new StreamObserver[PartitionChunk] {
                 override def onNext(chunk: PartitionChunk): Unit = {
+                  ensureOutputStream()
                   val bytes = chunk.payload.toByteArray
-                  val recLen = RecordIO.RecordSize
-                  var offset = 0
-                  while (offset + recLen <= bytes.length) {
-                    val rec = java.util.Arrays.copyOfRange(bytes, offset, offset + recLen)
-                    recordBuffer += rec
-                    offset += recLen
-                  }
+                  fos.write(bytes)
                 }
                 
                 override def onError(t: Throwable): Unit = {
                   Console.err.println(s"❌ Error from w$senderId: ${t.getMessage}")
+                  try {
+                    if (fos != null) fos.close()
+                  } catch { case _: Exception => () }
                   latch.countDown()
                 }
                 
                 override def onCompleted(): Unit = {
-                  if (recordBuffer.nonEmpty) {
-                    val runId = s"p${partitionId}_from_w$senderId"
-                    PartitionStore.addRun(runId, recordBuffer.toArray, checkpointDir)
-                    println(s"✅ Received p$partitionId from w$senderId: ${recordBuffer.size} records")
+                  try {
+                    if (fos != null) fos.close()
+                    val tmpFile   = new java.io.File(recvDir, s"$runId.dat.tmp")
+                    val finalFile = new java.io.File(recvDir, s"$runId.dat")
+                    if (finalFile.exists()) finalFile.delete()
+                    tmpFile.renameTo(finalFile)
+                    println(s"✅ Received p$partitionId from w$senderId (recovery) -> ${finalFile.getName}, ${finalFile.length()} bytes")
+                  } catch {
+                    case e: Exception =>
+                      Console.err.println(s"⚠️ Failed to finalize recv file for $runId: ${e.getMessage}")
                   }
                   latch.countDown()
                 }

@@ -549,7 +549,7 @@ object WorkerClient {
   private def cleanupTempDirectories(outputDir: String): Unit = {
     try {
       val sentCheckpointDir = new java.io.File(s"$outputDir/sent-checkpoint")
-      val shuffleCheckpointDir = new java.io.File(s"$outputDir/shuffle-checkpoint")
+      val recvDir = new java.io.File(s"$outputDir/recv")
       
       def deleteRecursively(file: java.io.File): Unit = {
         if (file.isDirectory) {
@@ -561,9 +561,9 @@ object WorkerClient {
       if (sentCheckpointDir.exists()) {
         deleteRecursively(sentCheckpointDir)
       }
-      
-      if (shuffleCheckpointDir.exists()) {
-        deleteRecursively(shuffleCheckpointDir)
+
+      if (recvDir.exists()) {
+        deleteRecursively(recvDir)
       }
     } catch {
       case e: Exception =>
