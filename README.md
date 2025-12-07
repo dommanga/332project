@@ -211,8 +211,9 @@ On restart (same VM, same CLI args):
 ### Master CLI
 
 ```bash
-sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G \
-  "runMain master.MasterServer <num_workers>"
+sbt assembly
+
+java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.jar master <num_workers>
 ```
 
 * Master binds to port `0` (OS chooses a free port).
@@ -233,10 +234,7 @@ sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G \
 ### Worker CLI
 
 ```bash
-# Basic
-sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
-    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
-    "runMain worker.WorkerClient <master_ip:port> -I <input_dir> -O <output_dir>"
+java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker <master_ip:port> -I <input_dir> -O <output_dir>
 ```
 
 * Worker:
@@ -264,10 +262,7 @@ We use env vars for deterministic failure testing:
 Example (crash worker 1 mid-shuffle):
 
 ```bash
-FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=1 \
-  sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
-      -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
-      "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/out"
+FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=1 java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 ```
 
 Then restart the same command **without** fault injection to recover.
@@ -328,8 +323,9 @@ On `vm-1-master`:
 
 ```bash
 cd ~/332project
-sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G \
-  "runMain master.MasterServer 3"
+sbt assembly
+
+java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.jar master 3
 ```
 
 Example output:
@@ -352,28 +348,19 @@ On two worker VMs (e.g., `vm17`, `vm18`, `vm19`):
 
 ```bash
 # Worker 0
-sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
-    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
-    "runMain worker.WorkerClient 2.2.2.254:5100 -I /dataset/small -O /home/orange/out"
+java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 
 # Worker 1
-sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
-    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
-    "runMain worker.WorkerClient 2.2.2.254:38278 -I /dataset/small -O /home/orange/out"
+java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 
 # Worker 2 (with fault injection example)
-FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 \
-sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
-    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
-    "runMain worker.WorkerClient 2.2.2.254:38278 -I /dataset/small -O /home/orange/out"
+FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 ```
 
 After the crash, restart Worker 2 without fault injection:
 
 ```bash
-sbt -J-Xms2G -J-Xmx4G -J-XX:MaxDirectMemorySize=8G \
-    -J-XX:+UseG1GC -J-XX:MaxGCPauseMillis=200 \
-    "runMain worker.WorkerClient 2.2.2.254:38278 -I /dataset/small -O /home/orange/out"
+java -Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -jar target/scala-2.13/dist-sort.jar worker 2.2.2.254:38278 -I /dataset/small -O /home/orange/out
 ```
 
 You should see:
@@ -404,7 +391,7 @@ You should see:
 
 ---
 
-## `deploy.sh` (Cluster Helper Script) - Not yet revised
+## `deploy.sh` (Cluster Helper Script)
 
 We provide a helper script for common cluster tasks.
 
@@ -435,8 +422,8 @@ DEFAULT_NUM_WORKERS=3
 | `gendata` | Generate test input data on workers using `gensort`                         |
 | `clean`   | Remove all files in `DATA_OUTPUT` on workers                                |
 | `reset`   | Currently equivalent to `clean` (can be extended to `clean+gendata`)       |
-| `start`   | Start worker processes (requires `num_workers` and current `MASTER_PORT`)   |
-| `restart` | Restart a **single** worker: `restart <host> <master_port>`                 |
+| `start`   | Start worker processes via `java -jar target/scala-2.13/dist-sort.jar worker ...` (requires `num_workers` and `MASTER_PORT`) |
+| `restart` | Restart a **single** worker using the same jar-based `worker` command                            |
 | `stop`    | Kill all `worker.WorkerClient` processes on the selected workers            |
 | `logs`    | Show last 50 lines of `/tmp/worker.log` from each worker                    |
 | `check`   | Run `valsort` on each partition and compare global input/output record counts |
@@ -454,7 +441,7 @@ DEFAULT_NUM_WORKERS=3
 ./deploy.sh reset
 
 # Terminal 1: Master (manual)
-sbt -J-Xms1G -J-Xmx2G -J-XX:MaxDirectMemorySize=4G "runMain master.MasterServer 3"
+java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.jar master 3
 # Master prints something like:
 #   2.2.2.254:45729
 # Use this PORT for deploy.sh
@@ -515,6 +502,7 @@ FAULT_INJECT_PHASE=mid-shuffle FAULT_INJECT_WORKER=2 ./deploy.sh start 3 45729
 * **RPC Framework**: gRPC via ScalaPB
 * **Data Generator**: `gensort` (optional, for local tests)
 * **Cluster Environment**: POSTECH VMs (`2.2.2.xxx`)
+* **Scala**: 2.13.13, **sbt**: 1.11.7, **Java**: 1.8
 
 ---
 

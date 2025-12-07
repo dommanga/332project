@@ -1,4 +1,6 @@
 import scalapb.compiler.Version.scalapbVersion
+import sbtassembly.AssemblyPlugin.autoImport._
+import sbtassembly.{MergeStrategy, PathList}
 
 ThisBuild / scalaVersion := "2.13.13"
 
@@ -19,5 +21,24 @@ lazy val root = (project in file("."))
       "io.grpc" % "grpc-stub" % "1.63.0",
       "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % "0.11.15",
       "org.scalatest" %% "scalatest" % "3.2.18" % Test
-    )
+    ),
+
+    assembly / mainClass := Some("entry.Main"),
+
+    assembly / assemblyJarName := "dist-sort.jar",
+
+    assembly / assemblyMergeStrategy := {
+      case PathList("META-INF", "io.netty.versions.properties") =>
+        MergeStrategy.first
+
+      case PathList("META-INF", "MANIFEST.MF") =>
+        MergeStrategy.discard
+
+      case PathList("META-INF", xs @ _*) =>
+        MergeStrategy.discard
+
+      case x =>
+        val old = (assembly / assemblyMergeStrategy).value
+        old(x)
+    }
   )

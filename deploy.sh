@@ -16,6 +16,9 @@ ALL_WORKERS=("vm14" "vm16" "vm17" "vm18" "vm19")
 
 RECORD_SIZE=100
 
+JAR_PATH="$PROJECT_DIR/target/scala-2.13/dist-sort.jar"
+JAVA_OPTS="-Xms2G -Xmx4G -XX:MaxDirectMemorySize=8G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
 # ============================================
 # 함수 정의
 # ============================================
@@ -127,15 +130,14 @@ start_workers() {
     fi
 
     ssh $SSH_OPTS "$host" "
-      cd $PROJECT_DIR && \
-      $remote_env_cmd \
-      nohup sbt \
-        -J-Xms2G \
-        -J-Xmx4G \
-        -J-XX:MaxDirectMemorySize=8G \
-        -J-XX:+UseG1GC \
-        -J-XX:MaxGCPauseMillis=200 \
-        \"runMain worker.WorkerClient $MASTER_IP:$MASTER_PORT -I $DATA_INPUT -O $DATA_OUTPUT\" \
+      cd '$PROJECT_DIR' && \
+      FAULT_INJECT_PHASE='$FAULT_INJECT_PHASE' \
+      FAULT_INJECT_WORKER='$FAULT_INJECT_WORKER' \
+      nohup java $JAVA_OPTS \
+        -jar '$JAR_PATH' \
+        worker $MASTER_IP:$MASTER_PORT \
+        -I '$DATA_INPUT' \
+        -O '$DATA_OUTPUT' \
         > /tmp/worker.log 2>&1 &
     " &
   done
@@ -148,22 +150,19 @@ restart_worker() {
 
   if [ -z "$host" ] || [ -z "$MASTER_PORT" ]; then
     echo "Usage: $0 restart <host> <master_port>"
-    echo "  예: $0 restart vm17 38278"
+    echo "  Ex: $0 restart vm17 38278"
     exit 1
   fi
 
   echo "=== Restarting worker on $host (master: $MASTER_IP:$MASTER_PORT) ==="
 
   ssh $SSH_OPTS "$host" "
-    cd $PROJECT_DIR && \
-    env -u FAULT_INJECT_PHASE -u FAULT_INJECT_WORKER \
-    nohup sbt \
-      -J-Xms2G \
-      -J-Xmx4G \
-      -J-XX:MaxDirectMemorySize=8G \
-      -J-XX:+UseG1GC \
-      -J-XX:MaxGCPauseMillis=200 \
-      \"runMain worker.WorkerClient $MASTER_IP:$MASTER_PORT -I $DATA_INPUT -O $DATA_OUTPUT\" \
+    cd '$PROJECT_DIR' && \
+    nohup java $JAVA_OPTS \
+      -jar '$JAR_PATH' \
+      worker $MASTER_IP:$MASTER_PORT \
+      -I '$DATA_INPUT' \
+      -O '$DATA_OUTPUT' \
       > /tmp/worker.log 2>&1 &
   "
 
