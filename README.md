@@ -211,8 +211,6 @@ On restart (same VM, same CLI args):
 ### Master CLI
 
 ```bash
-sbt assembly
-
 java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.jar master <num_workers>
 ```
 
@@ -307,24 +305,19 @@ mkdir -p data/input1 data/input2 data/input3
 * **Workers**: `vm01` ~ `vm20` (e.g., `2.2.2.101` ~ `2.2.2.120`)
 * **Dataset**: Provided under `/dataset`
 
-### 1. Deploy / Update Code
+### 1. Preparation
 
-On each worker VM:
+On master node:
+* Master and Each worker should have dist-sort.jar already
+  * If not, use deploy.sh (Cluster Helper Script)
 
 ```bash
 cd ~/332project
-git pull origin main
-sbt compile
 ```
 
 ### 2. Start Master
 
-On `vm-1-master`:
-
 ```bash
-cd ~/332project
-sbt assembly
-
 java -Xms1G -Xmx2G -XX:MaxDirectMemorySize=4G -jar target/scala-2.13/dist-sort.jar master 3
 ```
 
@@ -414,14 +407,15 @@ DEFAULT_NUM_WORKERS=3
 
 ### Commands
 
-| Command    | Description                                                                 |
+| Command    | Description                                                                |
 |-----------|-----------------------------------------------------------------------------|
 | `init`    | Initial setup on workers (git clone `332project`, create input/output dirs) |
 | `update`  | `git pull origin main` + `sbt compile` on all selected workers              |
+| `jar`     | Deploy `dist-sort.jar` to all selected workers                              |
 | `gensort` | Copy `gensort` and `valsort` binaries from `PROJECT_DIR` to each worker     |
 | `gendata` | Generate test input data on workers using `gensort`                         |
 | `clean`   | Remove all files in `DATA_OUTPUT` on workers                                |
-| `reset`   | Currently equivalent to `clean` (can be extended to `clean+gendata`)       |
+| `reset`   | Currently equivalent to `clean` (can be extended to `clean+gendata`)        |
 | `start`   | Start worker processes via `java -jar target/scala-2.13/dist-sort.jar worker ...` (requires `num_workers` and `MASTER_PORT`) |
 | `restart` | Restart a **single** worker using the same jar-based `worker` command                            |
 | `stop`    | Kill all `worker.WorkerClient` processes on the selected workers            |
@@ -437,7 +431,8 @@ DEFAULT_NUM_WORKERS=3
 ./deploy.sh gensort   # if using gensort-based data
 
 # Before each test
-./deploy.sh update
+sbt assembly
+./deploy.sh jar
 ./deploy.sh reset
 
 # Terminal 1: Master (manual)

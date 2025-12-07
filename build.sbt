@@ -31,14 +31,16 @@ lazy val root = (project in file("."))
       case PathList("META-INF", "io.netty.versions.properties") =>
         MergeStrategy.first
 
+      case PathList("META-INF", "services", xs @ _*) =>
+        MergeStrategy.concat
+
       case PathList("META-INF", "MANIFEST.MF") =>
         MergeStrategy.discard
 
       case PathList("META-INF", xs @ _*) =>
         MergeStrategy.discard
 
-      case x =>
-        val old = (assembly / assemblyMergeStrategy).value
-        old(x)
-    }
+      case _ =>
+        MergeStrategy.first
+        }
   )

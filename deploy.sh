@@ -63,6 +63,23 @@ update_code() {
   echo "✅ Code update complete"
 }
 
+deploy_jar() {
+  echo "=== Deploying dist-sort.jar to workers ==="
+
+  if [ ! -f "$JAR_PATH" ]; then
+    echo "❌ Jar not found at: $JAR_PATH"
+    exit 1
+  fi
+
+  for host in "${WORKERS[@]}"; do
+    echo "→ $host"
+    ssh "$host" "mkdir -p $(dirname "$JAR_PATH")"
+    scp "$JAR_PATH" "$host:$JAR_PATH"
+  done
+
+  echo "✅ dist-sort.jar deployed to all workers"
+}
+
 # 3. gensort + valsort 배포 (최초 1회)
 deploy_gensort() {
   echo "=== Deploying gensort and valsort to workers ==="
@@ -119,20 +136,15 @@ start_workers() {
 
     if [ -n "$FAULT_INJECT_PHASE" ] || [ -n "$FAULT_INJECT_WORKER" ]; then
       remote_env_cmd="env"
-      if [ -n "$FAULT_INJECT_PHASE" ]; then
-        remote_env_cmd="$remote_env_cmd FAULT_INJECT_PHASE='$FAULT_INJECT_PHASE'"
-      fi
-      if [ -n "$FAULT_INJECT_WORKER" ]; then
-        remote_env_cmd="$remote_env_cmd FAULT_INJECT_WORKER='$FAULT_INJECT_WORKER'"
-      fi
+      [ -n "$FAULT_INJECT_PHASE" ]  && remote_env_cmd="$remote_env_cmd FAULT_INJECT_PHASE='$FAULT_INJECT_PHASE'"
+      [ -n "$FAULT_INJECT_WORKER" ] && remote_env_cmd="$remote_env_cmd FAULT_INJECT_WORKER='$FAULT_INJECT_WORKER'"
     else
       remote_env_cmd="env -u FAULT_INJECT_PHASE -u FAULT_INJECT_WORKER"
     fi
 
     ssh $SSH_OPTS "$host" "
       cd '$PROJECT_DIR' && \
-      FAULT_INJECT_PHASE='$FAULT_INJECT_PHASE' \
-      FAULT_INJECT_WORKER='$FAULT_INJECT_WORKER' \
+      $remote_env_cmd \
       nohup java $JAVA_OPTS \
         -jar '$JAR_PATH' \
         worker $MASTER_IP:$MASTER_PORT \
@@ -304,6 +316,7 @@ usage() {
   echo "  reclone     - Remove project dir and fresh git clone on workers"
   echo "  init        - Initial setup (git clone, mkdir input/output dirs)"
   echo "  update      - git pull origin main && sbt compile on workers"
+  echo "  jar        - Copy dist-sort.jar from master to workers"
   echo "  gensort     - Copy gensort and valsort binaries to workers"
   echo "  gendata     - Generate test input data on workers (uses gensort)"
   echo "  clean       - Clean output directories (DATA_OUTPUT) on workers"
@@ -348,6 +361,9 @@ case "$1" in
     ;;
   update)
     update_code
+    ;;
+  jar)
+    deploy_jar
     ;;
   gensort)
     deploy_gensort
